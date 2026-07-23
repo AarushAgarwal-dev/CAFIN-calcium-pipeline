@@ -1,0 +1,162 @@
+{
+  "conditions": {
+    "trial1/BEFOREDRUG": {
+      "label": "Baseline",
+      "n_frames": 31,
+      "n_cells": 484,
+      "active_fraction": 0.9648760330578512,
+      "mean_peak_amp": 2.850910391388346,
+      "median_peak_amp": 2.1410927299922213,
+      "mean_peaks_per_frame": 0.06351639562783257,
+      "spatial_heterogeneity_cv": 0.7688506607869622,
+      "temporal_sync_r": 0.25951063900761073,
+      "trial": "trial1",
+      "condition": "Baseline",
+      "provenance": "recomputed from raw images"
+    },
+    "trial1/AFTERDRUG": {
+      "label": "Latrunculin",
+      "n_frames": 90,
+      "n_cells": 517,
+      "active_fraction": 1.0,
+      "mean_peak_amp": 9.234028899340398,
+      "median_peak_amp": 5.40353274875001,
+      "mean_peaks_per_frame": 0.19533634214485276,
+      "spatial_heterogeneity_cv": 0.9244013094416633,
+      "temporal_sync_r": 0.5320918438956671,
+      "trial": "trial1",
+      "condition": "Latrunculin",
+      "provenance": "recomputed from raw images"
+    },
+    "trial2/BEFOREDRUG": {
+      "label": "Baseline",
+      "n_frames": 31,
+      "n_cells": 479,
+      "active_fraction": 0.9832985386221295,
+      "mean_peak_amp": 2.517231478213126,
+      "median_peak_amp": 2.1422435812536658,
+      "mean_peaks_per_frame": 0.10445147821402115,
+      "spatial_heterogeneity_cv": 0.6773516472743651,
+      "temporal_sync_r": 0.24136226948662248,
+      "trial": "trial2",
+      "condition": "Baseline",
+      "provenance": "pipeline CSV (raw TIFFs unavailable)"
+    },
+    "trial2/AFTERDRUG": {
+      "label": "Latrunculin",
+      "n_frames": 55,
+      "n_cells": 452,
+      "active_fraction": 0.9867256637168141,
+      "mean_peak_amp": 2.211469896381352,
+      "median_peak_amp": 1.6385315553020807,
+      "mean_peaks_per_frame": 0.1337087691069992,
+      "spatial_heterogeneity_cv": 1.3407140196676426,
+      "temporal_sync_r": 0.36593884762921414,
+      "trial": "trial2",
+      "condition": "Latrunculin",
+      "provenance": "pipeline CSV (raw TIFFs unavailable)"
+    }
+  },
+  "tests": {
+    "peak_amp": {
+      "p": 1.6740715933814008e-27,
+      "U": 333353.0,
+      "effect": 0.2855295039259623,
+      "n1": 963,
+      "n2": 969,
+      "med1": 2.1422435812536658,
+      "med2": 3.1627596352651683,
+      "shapiro_p1": 7.743555354896431e-30,
+      "shapiro_p2": 8.800371786849796e-40,
+      "normal": false,
+      "test": "Mann-Whitney U"
+    },
+    "mean_dff": {
+      "p": 3.3924233348856057e-107,
+      "U": 196938.0,
+      "effect": 0.5779057318943317,
+      "n1": 963,
+      "n2": 969,
+      "med1": 0.3606186502560847,
+      "med2": 1.1106010545555591,
+      "shapiro_p1": 2.1887072670597295e-32,
+      "shapiro_p2": 4.339243957666959e-40,
+      "normal": false,
+      "test": "Mann-Whitney U"
+    },
+    "peaks_per_frame": {
+      "p": 1.039515980042696e-173,
+      "U": 123176.0,
+      "effect": 0.7359987226021195,
+      "n1": 963,
+      "n2": 969,
+      "med1": 0.0967741935483871,
+      "med2": 0.17777777777777778,
+      "shapiro_p1": 5.45822545739603e-19,
+      "shapiro_p2": 3.769930180619672e-18,
+      "normal": false,
+      "test": "Mann-Whitney U"
+    },
+    "auc": {
+      "p": 6.576806551273868e-75,
+      "U": 242057.0,
+      "effect": 0.48120285442700883,
+      "n1": 963,
+      "n2": 969,
+      "med1": 0.21571196626710926,
+      "med2": 0.7445118468033163,
+      "shapiro_p1": 1.1354589233774732e-40,
+      "shapiro_p2": 3.404766613443293e-41,
+      "normal": false,
+      "test": "Mann-Whitney U"
+    },
+    "pairwise_sync_r": {
+      "p": 0.0,
+      "U": 20859701.0,
+      "effect": 0.34813434374999996,
+      "n1": 8000,
+      "n2": 8000,
+      "med1": 0.24405225812194536,
+      "med2": 0.49092865947196196,
+      "shapiro_p1": 1.767984121124869e-19,
+      "shapiro_p2": 1.2331907929171884e-33,
+      "normal": false,
+      "test": "Mann-Whitney U"
+    }
+  },
+  "field_means": {
+    "spatial_heterogeneity_cv": {
+      "Baseline": 0.7231011540306637,
+      "Latrunculin": 1.132557664554653,
+      "per_field_Baseline": [
+        0.769,
+        0.677
+      ],
+      "per_field_Latrunculin": [
+        0.924,
+        1.341
+      ]
+    },
+    "temporal_sync_r": {
+      "Baseline": 0.2504364542471166,
+      "Latrunculin": 0.4490153457624406,
+      "per_field_Baseline": [
+        0.26,
+        0.241
+      ],
+      "per_field_Latrunculin": [
+        0.532,
+        0.366
+      ]
+    },
+    "active_fraction": {
+      "Baseline": 0.9740872858399903,
+      "Latrunculin": 0.9933628318584071
+    }
+  },
+  "params": {
+    "peak_threshold": 0.5,
+    "max_pairs": 4000,
+    "seed": 0
+  }
+}

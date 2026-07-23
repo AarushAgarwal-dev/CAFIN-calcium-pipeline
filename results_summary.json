@@ -1,0 +1,98 @@
+[
+  {
+    "n_cells": 501,
+    "active_fraction": 0.9740518962075848,
+    "mean_peak_amp_dff0": 2.9440462425584064,
+    "median_peak_amp_dff0": 1.4534149807966115,
+    "peak_freq_per_cell_per_frame": 0.07636340222780245,
+    "mean_peaks_per_cell": 2.367265469061876,
+    "spatial_heterogeneity_cv": 1.0136182401571763,
+    "temporal_synchronization_r": 0.18359068507669074,
+    "label": "Trial1 baseline (before drug)",
+    "num_frames": 31,
+    "baseline_frames": [
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ]
+  },
+  {
+    "n_cells": 542,
+    "active_fraction": 0.7656826568265682,
+    "mean_peak_amp_dff0": 0.9491260547239907,
+    "median_peak_amp_dff0": 0.8581869406695395,
+    "peak_freq_per_cell_per_frame": 0.06869618696186962,
+    "mean_peaks_per_cell": 6.182656826568266,
+    "spatial_heterogeneity_cv": 0.5819155875572305,
+    "temporal_synchronization_r": 0.6434770317530291,
+    "label": "Trial1 after LatA",
+    "num_frames": 90,
+    "baseline_frames": [
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89
+    ]
+  },
+  {
+    "n_cells": 506,
+    "active_fraction": 0.8952569169960475,
+    "mean_peak_amp_dff0": 1.2783696764058634,
+    "median_peak_amp_dff0": 1.0795601031807622,
+    "peak_freq_per_cell_per_frame": 0.05750350631136045,
+    "mean_peaks_per_cell": 1.7826086956521738,
+    "spatial_heterogeneity_cv": 0.5629137018789884,
+    "temporal_synchronization_r": 0.27645505099365514,
+    "label": "Trial2 baseline (before drug)",
+    "num_frames": 31,
+    "baseline_frames": [
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30
+    ]
+  },
+  {
+    "n_cells": 475,
+    "active_fraction": 0.9094736842105263,
+    "mean_peak_amp_dff0": 0.9885689487855346,
+    "median_peak_amp_dff0": 0.8109909904998954,
+    "peak_freq_per_cell_per_frame": 0.08964593301435407,
+    "mean_peaks_per_cell": 4.930526315789474,
+    "spatial_heterogeneity_cv": 0.6214390395304106,
+    "temporal_synchronization_r": 0.21386797129131618,
+    "label": "Trial2 after LatA",
+    "num_frames": 55,
+    "baseline_frames": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      48,
+      49,
+      50,
+      51,
+      52
+    ]
+  }
+]

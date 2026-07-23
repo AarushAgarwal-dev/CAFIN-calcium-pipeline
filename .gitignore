@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---------------------------------------------------------------- Raw imaging data
+# Microscopy stacks and large binaries are NOT tracked (GitHub 100 MB/file limit).
+# The processed per-cell CSVs ARE tracked so the analysis can be re-run.
+*.tif
+*.tiff
+*.nd2
+*.mat
+*.gif
+*.avi
+*.mp4
+*.pptx
+*.npy
+
+# ---------------------------------------------------------------- Bulk data / intermediate output
+Total data/
+lat_trial1_afterdrug/
+lat_trial1_afterdrug_output/
+myrunoutputs/
+motion_correct_output/
+Output/
+image_test/
+
+# ---------------------------------------------------------------- OS / editor junk
+desktop.ini
+Thumbs.db
+.DS_Store
+~$*
+*.tmp
+_pdf_text.txt
+_paper_text.txt
+_tblcheck.txt
+recompute_log.txt

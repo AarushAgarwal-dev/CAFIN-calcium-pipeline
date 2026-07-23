@@ -1,0 +1,27 @@
+{
+  "cond": "AFTERDRUG",
+  "n_frames": 90,
+  "n_cells": 517,
+  "n_roi_cells": 133,
+  "roi_box": [
+    144,
+    195,
+    372,
+    310
+  ],
+  "baseline_frames": [
+    77,
+    80,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89
+  ],
+  "segmentation": "cyto3 channels=[2,0] diam=15",
+  "registration": "rigid ECC",
+  "background": "3 auto regions, 1.5xIQR, avg-of-medians"
+}

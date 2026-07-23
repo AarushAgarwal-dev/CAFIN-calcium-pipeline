@@ -1,0 +1,56 @@
+[
+  {
+    "cond": "BEFOREDRUG",
+    "n_frames": 31,
+    "n_cells": 484,
+    "n_roi_cells": 133,
+    "roi_box": [
+      146,
+      205,
+      355,
+      325
+    ],
+    "baseline_frames": [
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ],
+    "segmentation": "cyto3 channels=[2,0] diam=15",
+    "registration": "rigid ECC",
+    "background": "3 auto regions, 1.5xIQR, avg-of-medians"
+  },
+  {
+    "cond": "AFTERDRUG",
+    "n_frames": 90,
+    "n_cells": 517,
+    "n_roi_cells": 133,
+    "roi_box": [
+      144,
+      195,
+      372,
+      310
+    ],
+    "baseline_frames": [
+      77,
+      80,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89
+    ],
+    "segmentation": "cyto3 channels=[2,0] diam=15",
+    "registration": "rigid ECC",
+    "background": "3 auto regions, 1.5xIQR, avg-of-medians"
+  }
+]
