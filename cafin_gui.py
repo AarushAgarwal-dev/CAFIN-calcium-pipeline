@@ -59,6 +59,38 @@ def _draw_box(gray_u8, box, color=(255, 235, 0), t=2):
     return rgb
 
 
+def frame_controls(key, n, label="Frame"):
+    """Prev/Next buttons + slider + auto-loop toggle for stepping through frames.
+    Returns (index, playing, speed). Each tab passes a distinct `key`. The slider is
+    keyed (unique id); the auto-loop advance is applied BEFORE the slider is created,
+    since a keyed widget's state cannot be modified after instantiation."""
+    if n <= 1:
+        return 0, False, 0.05
+    sk = key + "_slider"                                # slider's own key = source of truth
+    if ss.get(sk) is None:
+        ss[sk] = n - 1
+    if ss.pop(key + "_advance", False):                 # apply pending auto-loop step
+        ss[sk] = (int(ss[sk]) + 1) % n
+    ss[sk] = int(min(max(0, int(ss[sk])), n - 1))
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
+    if c1.button("◀ Prev", key=key + "_prev"):
+        ss[sk] = (ss[sk] - 1) % n
+    if c2.button("Next ▶", key=key + "_next"):
+        ss[sk] = (ss[sk] + 1) % n
+    play = c3.toggle("▶ Auto-loop", key=key + "_play")
+    speed = c4.slider("loop speed (s/frame)", 0.05, 1.0, 0.05, 0.05, key=key + "_speed")
+    idx = int(st.slider(label, 0, n - 1, key=sk))
+    return idx, play, speed
+
+
+def frame_loop(key, idx, play, speed, n):
+    """If playing, flag the next frame and rerun; frame_controls applies the step."""
+    if play and n > 1:
+        ss[key + "_advance"] = True
+        time.sleep(speed)
+        st.rerun()
+
+
 def detect_base(folder):
     for t in sorted(os.path.basename(f) for f in glob.glob(os.path.join(folder, "*.tif"))):
         m = re.match(r"(.*?)(\d{4})\.tif$", t)
@@ -316,7 +348,7 @@ with tabs[0]:
     if b2.button("Next ▶"):
         ss["frame_idx"] = (ss["frame_idx"] + 1) % n
     playing = b3.toggle("▶ Auto-loop", key="playing")
-    speed = b4.slider("loop speed (s/frame)", 0.05, 1.0, 0.15, 0.05)
+    speed = b4.slider("loop speed (s/frame)", 0.05, 1.0, 0.05, 0.05)
     idx = st.slider("Frame", 0, n - 1, int(ss["frame_idx"]))
     ss["frame_idx"] = idx
     fsel = fr[idx]
@@ -352,20 +384,39 @@ with tabs[1]:
     st.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
              caption="Frame-0 membrane with numbered cell ROIs", width="stretch")
 
+    st.subheader("Segmentation overlays (boundaries in red, cell IDs in yellow)")
+    sfi, splay, sspd = frame_controls("seg", len(frames))
+    sf = frames[sfi]
+    seg_mask = reg["mask_per_frame"].get(sf, mask0) if R.get("link") else mask0
+    _mem_base = reg["reg_mem"].get(sf, reg["reg_mem"][frames[0]])
+    _ca_base = reg["reg_ca"].get(sf, _mem_base)
+    _seg_mem = cc.numbered_mask_overlay(_mem_base, seg_mask, clahe=True)
+    _seg_ca = cc.numbered_mask_overlay(_ca_base, seg_mask, clahe=True)
+    sc1, sc2 = st.columns(2)
+    sc1.image(_seg_mem, caption=f"Segmentation + membrane ({mem_base}), frame {sf}", width="stretch")
+    sc2.image(_seg_ca, caption=f"Segmentation + calcium ({ca_base}), frame {sf}", width="stretch")
+    frame_loop("seg", sfi, splay, sspd, len(frames))
+
 # ---------------------------------------------------------- ROI tab
 with tabs[2]:
     if R.get("roi_box"):
         st.subheader(f"Region of interest — {len(roi_ids)} cells intersect the rectangle")
         x1, y1, x2, y2 = R["roi_box"]
-        base_img = cc.stretch8(reg["reg_mem"][0], clahe=True)
+        rfi, rplay, rspd = frame_controls("roiv", len(frames))
+        rf = frames[rfi]
+        rmask = reg["mask_per_frame"].get(rf, mask0) if R.get("link") else mask0
+        base_img = cc.stretch8(reg["reg_ca"].get(rf, reg["reg_mem"].get(rf, reg["reg_mem"][frames[0]])),
+                               clahe=True)
         disp = np.dstack([base_img] * 3).astype(float)
-        inside = np.isin(mask0, roi_ids)
-        disp[find_boundaries(mask0, mode="outer")] = [190, 60, 60]
+        inside = np.isin(rmask, roi_ids)
+        disp[find_boundaries(rmask, mode="outer")] = [190, 60, 60]
         disp[inside] = 0.55 * disp[inside] + 0.45 * np.array([0, 200, 220])
         disp = np.clip(disp, 0, 255).astype(np.uint8)
         disp[y1:y2, x1:x1 + 2] = [255, 235, 0]; disp[y1:y2, x2 - 2:x2] = [255, 235, 0]
         disp[y1:y1 + 2, x1:x2] = [255, 235, 0]; disp[y2 - 2:y2, x1:x2] = [255, 235, 0]
-        st.image(disp, caption="ROI rectangle (yellow); intersecting cells (cyan)", width="stretch")
+        st.image(disp, caption=f"ROI rectangle (yellow); intersecting cells (cyan), calcium frame {rf}",
+                 width="stretch")
+        frame_loop("roiv", rfi, rplay, rspd, len(frames))
     else:
         st.info("Enable **Restrict analysis to a region of interest** in the sidebar, draw a "
                 "rectangle above the Run button, then re-run.")
@@ -374,12 +425,15 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Per-cell ΔF/F0 traces")
     cells = [c for c in dff_df.columns if c.startswith("Cell_")]
+    tfi, tplay, tspd = frame_controls("trc", len(frames))
+    tf = frames[tfi]
     fig, ax = plt.subplots(figsize=(11, 4))
     for cn in cells:
         ax.plot(dff_df["Frame"], dff_df[cn], lw=0.4, alpha=0.25, color="steelblue")
     ax.plot(dff_df["Frame"], dff_df[cells].mean(axis=1), lw=2.2, color="crimson", label="population mean")
     for f in R["base"]:
         ax.axvspan(f - 0.5, f + 0.5, color="gold", alpha=0.12)
+    ax.axvline(tf, color="black", lw=1.5, alpha=0.8, label=f"frame {tf}")     # looping cursor
     ax.set_xlabel("Frame"); ax.set_ylabel("ΔF/F0"); ax.legend(); ax.grid(alpha=0.3)
     ax.set_title("gold = baseline (F0) frames")
     st.pyplot(fig)
@@ -389,9 +443,11 @@ with tabs[3]:
     arr = np.nan_to_num(dff_df[cells].to_numpy(float)).T
     im = ax2.imshow(arr, aspect="auto", cmap="magma", vmin=0,
                     vmax=np.percentile(arr, 99) if arr.size else 1, interpolation="nearest")
+    ax2.axvline(tfi, color="cyan", lw=1.5, alpha=0.9)                          # looping cursor
     ax2.set_xlabel("Frame"); ax2.set_ylabel("Cell")
     fig2.colorbar(im, ax=ax2, label="ΔF/F0")
     st.pyplot(fig2)
+    frame_loop("trc", tfi, tplay, tspd, len(frames))
 
 # ---------------------------------------------------------- Clustering
 with tabs[4]:
@@ -581,7 +637,7 @@ with tabs[5]:
         if t2.button("Next ▶", key="trk_next"):
             ss["trk_idx"] = (ss["trk_idx"] + 1) % nT
         trk_play = t3.toggle("▶ Auto-loop", key="trk_play")
-        trk_speed = t4.slider("loop speed (s/frame)", 0.05, 1.0, 0.15, 0.05, key="trk_speed")
+        trk_speed = t4.slider("loop speed (s/frame)", 0.05, 1.0, 0.05, 0.05, key="trk_speed")
         tidx = st.slider("Frame", 0, nT - 1, int(ss["trk_idx"]), key="trk_slider")
         ss["trk_idx"] = tidx
         ftrk = frames[tidx]

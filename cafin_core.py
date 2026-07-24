@@ -342,12 +342,12 @@ def segment_stack(images, diameter=15, gpu=False, model_type="cyto3",
     return np.stack(out).astype(np.int32)
 
 
-def numbered_mask_overlay(reg_mem0, mask):
+def numbered_mask_overlay(reg_mem0, mask, clahe=False, font_size=9):
     from PIL import Image, ImageDraw, ImageFont
-    disp = np.dstack([stretch8(reg_mem0)] * 3)
+    disp = np.dstack([stretch8(reg_mem0, clahe=clahe)] * 3)
     disp[find_boundaries(mask, mode="outer")] = [255, 0, 0]
     im = Image.fromarray(disp); d = ImageDraw.Draw(im)
-    try: font = ImageFont.truetype("arial.ttf", 9)
+    try: font = ImageFont.truetype("arial.ttf", font_size)
     except Exception: font = ImageFont.load_default()
     for p in regionprops(mask):
         y, x = p.centroid
