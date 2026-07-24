@@ -23,4 +23,8 @@ streamlit>=1.30
 plotly>=5.18          # ROI drag-box selector + interactive plots
 scikit-learn>=1.3     # PCA + K-means trace clustering
 itk-elastix>=0.20     # 'elastic' registration method (non-rigid B-spline)
+pillow>=9.0           # image drawing (ROI box, numbered overlays)
 # scipy (above) also powers the segment-every-frame cell tracker (cafin_track.py)
+
+# --- only for the optional AI cluster narration (Clustering tab, Amazon Bedrock) ---
+boto3>=1.28           # calls open-source models on Bedrock; also needs AWS credentials
