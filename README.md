@@ -1,154 +1,141 @@
-# CAFIN — Quantitative Analysis of Calcium Transients in Epithelial Cell Layers *in vivo*
+# CAFIN: calcium transient analysis in epithelial cell layers in vivo
 
-A reproducible image-analysis pipeline for single-cell **Ca²⁺ transient** analysis in the
-zebrafish larval fin epithelium, before and after cytoskeletal disruption (Latrunculin).
-
-It takes raw two-channel confocal time-lapse stacks (a **membrane** channel for structure and a
-**calcium** channel for signal) and produces per-cell ΔF/F₀ traces, tissue-level statistics,
-publication-style figures, and an auto-generated manuscript — plus an interactive GUI with
-cell tracking, trace clustering, and AI-assisted interpretation.
-
----
+CAFIN measures single-cell calcium (Ca2+) dynamics in the zebrafish larval fin epithelium,
+before and after cytoskeletal disruption with Latrunculin. It reads two-channel confocal
+time-lapse stacks (a membrane channel for structure and a calcium channel for signal) and
+produces per-cell ΔF/F0 traces, tissue-level statistics, figures, and a generated draft of the
+manuscript. There is also a Streamlit GUI for interactive work, with registration playback,
+cell tracking, trace clustering, and optional AI interpretation.
 
 ## How it works
 
-| Stage | What happens |
-|---|---|
-| **1. Registration** | Motion-corrects the time-lapse. Rigid = OpenCV **ECC**; non-rigid = **itk-elastix** B-spline. Registration is computed on the *membrane* channel and the transform applied to the *calcium* channel, preserving cross-channel correspondence. |
-| **2. Segmentation** | **Cellpose** (`cyto3`, `channels=[2,0]`, diameter ≈ 15 px) on the reference membrane frame → an integer-labelled cell mask. |
-| **3. Background subtraction** | Three signal-free reference regions per frame; values outside 1.5×IQR discarded, each region reduced to its median, the mean of the three medians subtracted and clipped at zero. |
-| **4. ROI selection** | Optional rectangular region of interest — every cell whose mask intersects it is retained and exported separately. |
-| **5. Trace extraction** | Mean pixel intensity inside each cell mask per frame → **ΔF/F₀ = (Fₜ − F₀)/F₀**, where F₀ is the mean of the lowest-activity frames. |
-| **6. Cell tracking** *(optional)* | Segments **every** frame independently and links cells into stable global IDs — weighted IoU + size + centroid score, **Hungarian** assignment, forward/backward propagation, and gap closing. |
-| **7. Analysis** | Per-cell metrics (peak ΔF/F₀, transient rate, per-frame AUC); tissue metrics — **spatial heterogeneity** (CV of peak amplitude) and **temporal synchronization** (mean pairwise correlation); spatial coordination vs inter-cell distance; time-dependence. |
-| **8. Statistics** | Shapiro–Wilk normality → Welch *t*-test if normal, otherwise Mann–Whitney U; rank-biserial effect sizes; Kruskal–Wallis across regions. |
+The pipeline runs in eight steps.
 
----
+1. Registration. Corrects tissue motion in the time-lapse. Rigid alignment uses OpenCV ECC;
+   non-rigid alignment uses itk-elastix B-spline. Registration is computed on the membrane channel
+   and the same transform is applied to the calcium channel, so the two stay aligned.
+2. Segmentation. Cellpose (cyto3, channels=[2,0], diameter about 15 px) runs on the reference
+   membrane frame and returns a labelled cell mask.
+3. Background subtraction. Three signal-free regions are sampled in each frame. Values outside
+   1.5x IQR are dropped, each region is reduced to its median, and the mean of the three medians
+   is subtracted from the frame and clipped at zero.
+4. ROI selection (optional). Draw a rectangle; any cell whose mask touches it is kept and exported
+   separately.
+5. Trace extraction. For each cell, the mean pixel value inside its mask is measured per frame.
+   Traces are normalised as ΔF/F0 = (Ft - F0)/F0, where F0 is the mean of the lowest-activity frames.
+6. Cell tracking (optional). Every frame is segmented on its own, then cells are linked into stable
+   IDs. Matching combines an IoU, size, and centroid score with Hungarian assignment, propagates
+   forward and backward from a reference frame, and closes short gaps.
+7. Analysis. Per-cell metrics include peak ΔF/F0, transient rate, and per-frame area. Tissue metrics
+   include spatial heterogeneity (the coefficient of variation of peak amplitude) and temporal
+   synchronization (the mean pairwise correlation). It also computes correlation against inter-cell
+   distance and how activity changes over the recording.
+8. Statistics. Normality is checked with Shapiro-Wilk. If both groups are normal it uses a Welch
+   t-test, otherwise Mann-Whitney U. Effect sizes are reported as the rank-biserial correlation, and
+   regional comparisons use Kruskal-Wallis.
 
-## How to run
+## Running it
 
-### Install
+Install the dependencies:
 
 ```bash
 pip install -r REPRODUCE/requirements.txt
 ```
 
-Core: `numpy pandas scipy matplotlib scikit-image opencv-python tifffile cellpose torch`.
-GUI extras: `streamlit plotly scikit-learn itk-elastix boto3`.
+The core packages are numpy, pandas, scipy, matplotlib, scikit-image, opencv-python, tifffile,
+cellpose, and torch. The GUI also needs streamlit, plotly, scikit-learn, itk-elastix, and boto3.
 
-### A. Interactive GUI
+### GUI
 
 ```bash
 streamlit run cafin_gui.py
 ```
 
-In the sidebar set the **trial folder** (must contain `membrane/` and `ca2/` subfolders of numbered
-`.tif` frames), pick a method, then click **Run analysis**.
+Set the trial folder in the sidebar. It needs `membrane/` and `ca2/` subfolders of numbered `.tif`
+frames. Pick a method and click Run analysis.
 
-**Analysis methods**
-- **Rigid (ECC)** — global motion correction, fixed frame-0 mask.
-- **Elastic (itk-elastix)** — non-rigid B-spline correction (`fast` / `balanced` / `accurate`).
-- **Cell tracking** — segments every frame and links cells into stable IDs (no registration).
+The three methods are:
 
-**Tabs**
-- 🎞 **Registration + movie** — green/magenta before/after overlay, frame navigation (◀ ▶), auto-loop.
-- 🧫 **Segmentation** — numbered cell ROIs.
-- 🎯 **ROI** — drag a box directly on the calcium frame to restrict analysis; ROI-only CSV export.
-- 📈 **Traces / ΔF/F₀** — per-cell traces and a cells × frames activity heatmap.
-- 🧩 **Clustering** — PCA (5–30 components) + K-means; cells colored by cluster on the tissue,
-  PC1/PC2 scatter, cluster-average traces, plus the AI narrative (below).
-- 🎯 **Tracking** — stable global IDs colored across frames, with navigation + auto-loop.
-- 📊 **Statistics** · ⬇ **Downloads** (CSV / GIF).
+* Rigid (ECC): global motion correction with a fixed frame-0 mask.
+* Elastic (itk-elastix): non-rigid B-spline correction, at fast, balanced, or accurate quality.
+* Cell tracking: segments every frame and links cells into stable IDs, without registration.
 
-### B. Reproduce the full study (figures + paper)
+The tabs cover the registration overlay with frame playback, segmentation, ROI drawing, per-cell
+traces and a heatmap, PCA plus K-means clustering, tracking, statistics, and CSV or GIF export.
+
+### Reproduce the study
 
 ```bash
 cd REPRODUCE
 python run_all.py
 ```
 
-Runs, in order:
-1. `recompute_from_raw.py` — regenerates ΔF/F₀ from the raw TIFFs end-to-end
-   *(skipped if `regenerated/` exists; pass `--recompute` to force)*
-2. `reproduce.py` — analysis, statistics, quantitative figures
-3. `figures_paper.py` — paper-style figures from the real images
-4. `generate_paper.py` — assembles the manuscript (`.docx`) and `PROOF.md`
+This regenerates ΔF/F0 from the raw TIFFs, runs the analysis and statistics, builds the figures, and
+assembles the draft manuscript (`.docx`) and `PROOF.md`. Results are written to `REPRODUCE/results/`.
+A fixed random seed makes re-runs identical. More detail is in
+[`REPRODUCE/README_REPRODUCE.md`](REPRODUCE/README_REPRODUCE.md).
 
-Outputs land in `REPRODUCE/results/` (CSVs, `results.json`, 15 figures) plus
-`CAFIN_reproduced_paper.docx`. A fixed random seed makes re-runs byte-identical.
-Details: [`REPRODUCE/README_REPRODUCE.md`](REPRODUCE/README_REPRODUCE.md).
+### AI interpretation (optional)
 
-### C. AI interpretation (optional — Amazon Bedrock)
+The Clustering tab can write a short findings narrative from the clustering, using open-source
+models on Amazon Bedrock (Llama 3.3 70B by default; Llama 3.1, DeepSeek-R1, and Mixtral are also
+available) through the Converse API.
 
-The Clustering tab can turn the clustering into a written "Findings" narrative using
-**open-source models on Amazon Bedrock** (Llama 3.3 70B by default; Llama 3.1, DeepSeek-R1 and
-Mixtral also selectable) through the model-agnostic Converse API.
+1. Sign in with `aws login` (or `aws configure`).
+2. Enable access to your chosen model in the Bedrock console for your region.
+3. In the GUI, fill in the background box (drug, concentration, protocol), click Test connection,
+   then run either the cluster summary or the full time-course analysis.
 
-1. Authenticate — `aws login` (or `aws configure`)
-2. Enable model access for your chosen model in the Bedrock console, in your region
-3. In the GUI: fill in **Background / context** (drug, concentration, protocol…), click
-   **🔌 Test connection**, then either:
-   - **✍ Story from clusters** — per-cluster summary statistics
-   - **🎞 Full temporal analysis** — the entire time-course across all frames
+The model only sees the numeric summaries shown in the "data sent to the model" panel. Treat its
+output as a hypothesis rather than a result.
 
-The model only ever sees the numeric summaries shown in the *"data sent to the model"* expander.
-Treat its output as hypotheses, not conclusions.
-
----
-
-## Repository layout
+## Layout
 
 ```
-cafin_core.py        registration (ECC / itk-elastix), segmentation, background, ΔF/F₀, ROI, clustering
-cafin_track.py       cell tracking — per-frame segmentation linked by Hungarian matching + gap closing
+cafin_core.py        registration (ECC, itk-elastix), segmentation, background, ΔF/F0, ROI, clustering
+cafin_track.py       cell tracking: per-frame segmentation linked by Hungarian matching and gap closing
 cafin_pipeline.py    scripted end-to-end pipeline (no GUI)
 cafin_gui.py         Streamlit application
 cafin_ai.py          Amazon Bedrock (open-source models) narration of clustering results
-REPRODUCE/           fully reproducible study: scripts, results, figures, generated paper
-  ├── run_all.py             one command: recompute → analyse → figures → paper
-  ├── reproduce.py           metrics, statistics, quantitative figures
-  ├── figures_paper.py       paper-style figures from real images
-  ├── generate_paper.py      builds the manuscript + PROOF.md
-  ├── recompute_from_raw.py  regenerates ΔF/F₀ from raw TIFFs
-  ├── WORKLOG.md             full record of the analysis and its caveats
-  └── results/               CSVs, results.json, figures/
-LATA1TRAIL/, LATA2TRIAL/     per-trial processed data (before / after drug)
+REPRODUCE/           scripts, results, figures, and the generated paper
+  run_all.py             recompute, analyse, build figures, build paper
+  reproduce.py           metrics, statistics, quantitative figures
+  figures_paper.py       paper-style figures from real images
+  generate_paper.py      builds the manuscript and PROOF.md
+  recompute_from_raw.py  regenerates ΔF/F0 from raw TIFFs
+  WORKLOG.md             record of the analysis and its caveats
+  results/               CSVs, results.json, figures
+LATA1TRAIL/, LATA2TRIAL/  per-trial processed data (before and after drug)
 ```
 
-Raw microscopy stacks (`.tif`, `.nd2`) and other large binaries are **not** tracked — only the
-processed per-cell CSVs needed to re-run the analysis.
-
----
+Raw microscopy stacks (`.tif`, `.nd2`) and other large binaries are not tracked. Only the processed
+per-cell CSVs needed to re-run the analysis are included.
 
 ## Data
 
-Each trial folder holds a **BEFOREDRUG** (baseline) and **AFTERDRUG** (Latrunculin) condition with:
+Each trial folder has a baseline (BEFOREDRUG) and a Latrunculin (AFTERDRUG) condition. The files are:
 
-| File | Contents |
-|---|---|
-| `all_cells_raw.csv` | raw per-cell mean intensity per frame |
-| `all_cells_normalized.csv` | per-cell ΔF/F₀ |
-| `roi_cells_normalized.csv` | ΔF/F₀ restricted to the ROI |
-| `centroids_0.csv` | cell centroids (for spatial analysis) |
+* `all_cells_raw.csv`: raw per-cell mean intensity per frame
+* `all_cells_normalized.csv`: per-cell ΔF/F0
+* `roi_cells_normalized.csv`: ΔF/F0 for the ROI cells
+* `centroids_0.csv`: cell centroids, used for spatial analysis
 
 To run from raw images, a trial folder needs `membrane/` and `ca2/` subfolders of numbered `.tif`
-frames (e.g. `..._0000.tif`, `..._0001.tif`, …).
+frames, for example `..._0000.tif`, `..._0001.tif`, and so on.
 
----
+## Notes
 
-## Notes and limitations
+Per-frame Cellpose segmentation, used by the tracking method, is slow on CPU, roughly 30 to 60
+seconds per frame. Use the frame-step control to subsample, or run a CUDA build of torch. The
+itk-elastix registration takes about 0.5, 3, or 5 seconds per frame at fast, balanced, or accurate
+quality.
 
-- **Per-frame Cellpose segmentation** (the tracking method) is slow on CPU (~30–60 s/frame). Use the
-  **frame-step** control to subsample, or install a CUDA build of torch.
-- **itk-elastix** non-rigid registration runs ≈ 0.5 / 3 / 5 s per frame for fast / balanced / accurate.
-- **Statistical caveat**: pooled per-cell p-values treat individual cells as replicates. With only two
-  biological trials per condition, the **per-trial direction of effect** is the primary evidence —
-  see the generated paper and `REPRODUCE/WORKLOG.md`.
-
----
+One caveat on statistics: the pooled per-cell p-values treat individual cells as replicates. With
+only two biological trials per condition, the per-trial direction of the effect is the primary
+evidence. This is discussed in the generated paper and in `REPRODUCE/WORKLOG.md`.
 
 ## Acknowledgements
 
-Cell-tracking algorithm after **Linlin Li** (`Cell_Tracking_2D`), extended with optimal Hungarian
-assignment and gap closing. Segmentation uses [Cellpose](https://github.com/MouseLand/cellpose);
-non-rigid registration uses [ITKElastix](https://github.com/InsightSoftwareConsortium/ITKElastix).
+The cell-tracking algorithm follows Linlin Li's Cell_Tracking_2D, extended here with Hungarian
+assignment and gap closing. Segmentation uses [Cellpose](https://github.com/MouseLand/cellpose).
+Non-rigid registration uses [ITKElastix](https://github.com/InsightSoftwareConsortium/ITKElastix).
