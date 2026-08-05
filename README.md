@@ -34,16 +34,50 @@ The pipeline runs in eight steps.
    t-test, otherwise Mann-Whitney U. Effect sizes are reported as the rank-biserial correlation, and
    regional comparisons use Kruskal-Wallis.
 
-## Running it
+## Installing
 
-Install the dependencies:
+The installer detects your operating system and graphics card, installs the matching build of
+PyTorch, then installs everything else. It works the same on Windows, macOS, and Linux.
+
+**Windows:** double-click `install_windows.bat`, or run it from a terminal.
+
+**macOS or Linux:** double-click `install_mac.command`, or run `bash install_mac.command`.
+
+**Any system, from a terminal:**
 
 ```bash
-pip install -r REPRODUCE/requirements.txt
+python install.py
 ```
 
-The core packages are numpy, pandas, scipy, matplotlib, scikit-image, opencv-python, tifffile,
-cellpose, and torch. The GUI also needs streamlit, plotly, scikit-learn, itk-elastix, and boto3.
+Useful flags: `--venv` installs into a local `.venv` instead of your main Python, `--cpu` skips
+GPU detection, and `--launch` opens the GUI when the install finishes.
+
+Once installed, start the app by double-clicking `run_gui.bat` (Windows) or `run_gui.command`
+(macOS), or by running `streamlit run cafin_gui.py`.
+
+To install by hand instead, use `pip install -r REPRODUCE/requirements.txt`. The core packages are
+numpy, pandas, scipy, matplotlib, scikit-image, opencv-python, tifffile, cellpose, and torch. The
+GUI also needs streamlit, plotly, scikit-learn, itk-elastix, pillow, and boto3.
+
+### Graphics card support
+
+Cellpose segmentation is the slow step, and it is the part that runs on the GPU. Registration
+(OpenCV ECC and itk-elastix) is CPU-only either way.
+
+| Hardware | Backend | Installed by |
+|---|---|---|
+| NVIDIA, Windows or Linux | CUDA | `pip install torch --index-url https://download.pytorch.org/whl/cu124` |
+| AMD or Intel, Windows | DirectML | `pip install torch-directml` |
+| AMD, Linux | ROCm | `pip install torch --index-url https://download.pytorch.org/whl/rocm6.2` |
+| Apple Silicon | MPS | stock `pip install torch` |
+
+The installer picks the right one automatically. The GUI shows which backend it found next to the
+"Use GPU for segmentation" checkbox. If a GPU backend fails partway through a run, segmentation
+falls back to the CPU and continues.
+
+An AMD card in an Intel Mac (a Radeon Pro 5500 XT in a 2019 Mac Pro or 2020 iMac, say) has no
+PyTorch GPU backend, since MPS requires Apple Silicon. That run stays on the CPU. The same card in
+a Windows machine works through DirectML.
 
 ### GUI
 
@@ -130,9 +164,9 @@ seconds per frame. Use the frame-step control to subsample, or run a CUDA build 
 itk-elastix registration takes about 0.5, 3, or 5 seconds per frame at fast, balanced, or accurate
 quality.
 
-One caveat on statistics: the pooled per-cell p-values treat individual cells as replicates. With
-only two biological trials per condition, the per-trial direction of the effect is the primary
-evidence. This is discussed in the generated paper and in `REPRODUCE/WORKLOG.md`.
+On the statistics: the pooled per-cell p-values treat individual cells as replicates. With only two
+biological trials per condition, the per-trial direction of the effect is the primary evidence.
+This is discussed in the generated paper and in `REPRODUCE/WORKLOG.md`.
 
 ## Acknowledgements
 

@@ -2,7 +2,7 @@
 cafin_ai.py  --  Amazon Bedrock narration of the trace-clustering results.
 
 Given compact per-cluster statistics (computed by the GUI from the PCA + K-means
-clustering of per-cell ΔF/F0 traces), ask a Claude model on Amazon Bedrock to write
+clustering of per-cell ΔF/F0 traces), ask an open-source model on Amazon Bedrock to write
 a rigorous "findings" narrative — characterising each cluster's dynamics and spatial
 location, contrasting them, and proposing testable biological interpretations.
 

@@ -59,7 +59,39 @@ def _draw_box(gray_u8, box, color=(255, 235, 0), t=2):
     return rgb
 
 
-def frame_controls(key, n, label="Frame"):
+def pick_folder(initial=None, title="Select folder"):
+    """Open a native folder-selection dialog. Works because the app runs locally
+    (the dialog opens on the machine running Streamlit). Returns a path or None."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", 1)
+        path = filedialog.askdirectory(master=root, title=title,
+                                       initialdir=initial if initial and os.path.isdir(initial)
+                                       else os.getcwd())
+        root.destroy()
+        return path or None
+    except Exception:
+        return None
+
+
+def find_trial_folders(root_dir, max_depth=3):
+    """Return folders under root_dir that contain both membrane/ and ca2/ subfolders."""
+    out = []
+    root_dir = os.path.abspath(root_dir)
+    base = root_dir.rstrip(os.sep).count(os.sep)
+    for dirpath, dirnames, _ in os.walk(root_dir):
+        if dirpath.count(os.sep) - base >= max_depth:
+            dirnames[:] = []
+            continue
+        if "membrane" in dirnames and "ca2" in dirnames:
+            out.append(dirpath)
+    return sorted(out)
+
+
+def frame_controls(key, n, label="Frame", start=None):
     """Prev/Next buttons + slider + auto-loop toggle for stepping through frames.
     Returns (index, playing, speed). Each tab passes a distinct `key`. The slider is
     keyed (unique id); the auto-loop advance is applied BEFORE the slider is created,
@@ -68,7 +100,7 @@ def frame_controls(key, n, label="Frame"):
         return 0, False, 0.05
     sk = key + "_slider"                                # slider's own key = source of truth
     if ss.get(sk) is None:
-        ss[sk] = n - 1
+        ss[sk] = (n - 1) if start is None else int(min(max(0, start), n - 1))
     if ss.pop(key + "_advance", False):                 # apply pending auto-loop step
         ss[sk] = (int(ss[sk]) + 1) % n
     ss[sk] = int(min(max(0, int(ss[sk])), n - 1))
@@ -103,8 +135,34 @@ def detect_base(folder):
 st.sidebar.title("CAFIN pipeline")
 st.sidebar.caption("Motion correction → segmentation → ΔF/F0 → statistics")
 
-default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lat_trial1_afterdrug")
-trial = st.sidebar.text_input("Trial folder (contains membrane/ and ca2/)", default_root)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if "trial_path" not in ss:
+    ss["trial_path"] = os.path.join(APP_DIR, "lat_trial1_afterdrug")
+
+st.sidebar.markdown("### Data folder")
+_b1, _b2 = st.sidebar.columns(2)
+if _b1.button("📂 Browse…", width="stretch", help="Open a folder picker on this machine"):
+    _p = pick_folder(ss["trial_path"], "Select the trial folder (with membrane/ and ca2/)")
+    if _p:
+        ss["trial_path"] = os.path.normpath(_p)
+        st.rerun()
+if _b2.button("🔍 Find trials", width="stretch", help="Scan for folders containing membrane/ and ca2/"):
+    found = find_trial_folders(APP_DIR) or find_trial_folders(os.path.dirname(APP_DIR))
+    ss["found_trials"] = found
+    if not found:
+        st.sidebar.warning("No folders with membrane/ and ca2/ found nearby.")
+
+if ss.get("found_trials"):
+    _opts = ["(choose a detected folder)"] + ss["found_trials"]
+    _sel = st.sidebar.selectbox("Detected trial folders", _opts,
+                                format_func=lambda p: p if p.startswith("(") else os.path.relpath(p, APP_DIR))
+    if not _sel.startswith("(") and os.path.abspath(_sel) != os.path.abspath(ss["trial_path"]):
+        ss["trial_path"] = os.path.normpath(_sel)
+        st.rerun()
+
+trial = st.sidebar.text_input("Trial folder (contains membrane/ and ca2/)", value=ss["trial_path"])
+if trial and os.path.normpath(trial) != os.path.normpath(ss["trial_path"]):
+    ss["trial_path"] = os.path.normpath(trial)
 memf, caf = os.path.join(trial, "membrane"), os.path.join(trial, "ca2")
 
 mem_base = ca_base = ""
@@ -162,8 +220,10 @@ else:   # Cell tracking — exactly the wound-closure pipeline (segment -> clean
                        "Use **frame-step** below to subsample long series.")
 
 # --- GPU / CUDA ---
-cuda_ok, cuda_msg = cc.cuda_status()
-use_gpu = st.sidebar.checkbox("Use GPU (CUDA) for segmentation", value=cuda_ok)
+cuda_ok, cuda_msg, gpu_backend = cc.gpu_status()
+use_gpu = st.sidebar.checkbox("Use GPU for segmentation", value=cuda_ok,
+                              help="Works with NVIDIA (CUDA), AMD (DirectML on Windows, ROCm on "
+                                   "Linux), and Apple Silicon. Registration stays on CPU.")
 (st.sidebar.success if cuda_ok else st.sidebar.info)(cuda_msg)
 
 with st.sidebar.expander("Advanced parameters", expanded=False):
@@ -246,13 +306,47 @@ if roi_on and ok_data:
                 st.image(_draw_box(gray, ss["roi_box"]), width="stretch")
 
 
+# =========================================================== PREVIEW (before analysis)
+if ok_data and n_frames:
+    with st.expander("👁  Preview data (before running the analysis)", expanded=("res" not in ss)):
+        pfi, pplay, pspd = frame_controls("prev", n_frames, start=0)
+        try:
+            _pm_path = os.path.join(memf, f"{mem_base}{pfi:04d}.tif")
+            _pc_path = os.path.join(caf, f"{ca_base}{pfi:04d}.tif")
+            pm = skio.imread(_pm_path) if os.path.exists(_pm_path) else None
+            pc = skio.imread(_pc_path) if os.path.exists(_pc_path) else None
+            pv1, pv2 = st.columns(2)
+            if pm is not None:
+                pv1.image(cc.stretch8(pm, clahe=True),
+                          caption=f"Membrane — {os.path.basename(_pm_path)}", width="stretch")
+            else:
+                pv1.warning("Membrane frame not found.")
+            if pc is not None:
+                pv2.image(cc.stretch8(pc, clahe=True),
+                          caption=f"Calcium — {os.path.basename(_pc_path)}", width="stretch")
+            else:
+                pv2.warning("Calcium frame not found.")
+            ref = pm if pm is not None else pc
+            if ref is not None:
+                q1, q2, q3, q4 = st.columns(4)
+                q1.metric("Frames", n_frames)
+                q2.metric("Image size", f"{ref.shape[1]} × {ref.shape[0]}")
+                q3.metric("Bit depth", str(ref.dtype))
+                if pc is not None:
+                    q4.metric("Calcium range", f"{int(pc.min())}–{int(pc.max())}")
+            st.caption("Step through the raw frames to check the data and judge how much motion "
+                       "there is before choosing a registration method.")
+            frame_loop("prev", pfi, pplay, pspd, n_frames)
+        except Exception as e:
+            st.warning(f"Could not preview frames: {e}")
+
 # =========================================================== RUN
 if run:
     n_use = n_frames if max_frames == 0 else min(max_frames, n_frames)
     prog = st.progress(0.0, text="Starting…")
     tstats = None
     with st.status("Running pipeline…", expanded=True) as status:
-        dev = "GPU (CUDA)" if (use_gpu and cuda_ok) else "CPU"
+        dev = f"GPU ({gpu_backend})" if (use_gpu and cuda_ok) else "CPU"
 
         if link_tracking:                                     # ---- segment every frame -> clean -> track ----
             st.write("Loading frames…")
@@ -497,6 +591,7 @@ with tabs[4]:
         st.pyplot(figc)
 
         cluster_df = pd.DataFrame({"cell_id": ids, "cluster": labels})
+        ss["cluster_df"] = cluster_df          # made available to the Downloads tab
         st.download_button("⬇ cluster assignments (CSV)", cluster_df.to_csv(index=False).encode(),
                            "cluster_assignments.csv", "text/csv")
 
@@ -691,7 +786,74 @@ with tabs[6]:
 
 # ---------------------------------------------------------- Downloads
 with tabs[7]:
-    st.subheader("Export")
+    # ------------------------------------------------ save straight to a folder
+    st.subheader("Save results to a folder")
+    if "save_dir" not in ss:
+        ss["save_dir"] = trial + "_output"
+    sd1, sd2 = st.columns([1, 3])
+    if sd1.button("📂 Choose folder…", width="stretch"):
+        _sp = pick_folder(ss["save_dir"], "Select a folder to save the results into")
+        if _sp:
+            ss["save_dir"] = os.path.normpath(_sp)
+            st.rerun()
+    _sd = sd2.text_input("Output folder", value=ss["save_dir"])
+    if _sd and os.path.normpath(_sd) != os.path.normpath(ss["save_dir"]):
+        ss["save_dir"] = os.path.normpath(_sd)
+
+    # what can be saved from the current results
+    _avail = {
+        "Raw traces (all_cells_raw.csv)": ("all_cells_raw.csv", "csv", raw_df),
+        "ΔF/F0 traces (cells_normalized.csv)": ("cells_normalized.csv", "csv", dff_df),
+        "Metrics (metrics.csv)": ("metrics.csv", "csv", pd.DataFrame([stats])),
+        "Segmentation mask (mask_0.tiff)": ("mask_0.tiff", "tiff", mask0),
+    }
+    if roi_ids:
+        _keep = ["Frame"] + [f"Cell_{i}" for i in roi_ids if f"Cell_{i}" in dff_all.columns]
+        _avail["ROI-only ΔF/F0 (roi_cells_normalized.csv)"] = ("roi_cells_normalized.csv", "csv",
+                                                               dff_all[_keep])
+    if ss.get("cluster_df") is not None:
+        _avail["Cluster assignments (cluster_assignments.csv)"] = ("cluster_assignments.csv", "csv",
+                                                                   ss["cluster_df"])
+    if R.get("link") and reg.get("mask_per_frame"):
+        _avail["Tracked masks (tracked_masks.tiff)"] = ("tracked_masks.tiff", "stack", None)
+    if ss.get("gif_path") and os.path.exists(ss["gif_path"]):
+        _avail["Registration overlay GIF"] = ("registration_overlay.gif", "copy", ss["gif_path"])
+    for _k, _lbl in (("ai_story", "AI findings — clusters (ai_findings_clusters.md)"),
+                     ("ai_story_full", "AI findings — full time-course (ai_findings_timecourse.md)")):
+        if ss.get(_k):
+            _avail[_lbl] = (_lbl.split("(")[-1].rstrip(")"), "text", ss[_k])
+
+    picks = st.multiselect("Pick what to save", list(_avail), default=list(_avail))
+    if st.button("💾 Save selected", type="primary", disabled=not picks):
+        try:
+            os.makedirs(ss["save_dir"], exist_ok=True)
+            written = []
+            for name in picks:
+                fname, kind, obj = _avail[name]
+                dest = os.path.join(ss["save_dir"], fname)
+                if kind == "csv":
+                    obj.to_csv(dest, index=False)
+                elif kind == "tiff":
+                    import tifffile
+                    tifffile.imwrite(dest, np.asarray(obj).astype(np.uint16))
+                elif kind == "stack":
+                    import tifffile
+                    tifffile.imwrite(dest, np.stack([reg["mask_per_frame"][f] for f in frames
+                                                     if f in reg["mask_per_frame"]]).astype(np.uint16))
+                elif kind == "text":
+                    open(dest, "w", encoding="utf-8").write(obj)
+                elif kind == "copy":
+                    import shutil
+                    shutil.copyfile(obj, dest)
+                written.append(fname)
+            st.success(f"Saved {len(written)} file(s) to {ss['save_dir']}")
+            st.caption(", ".join(written))
+        except Exception as e:
+            st.error(f"Could not save: {e}")
+
+    # ------------------------------------------------ browser downloads
+    st.divider()
+    st.subheader("Or download individually")
     st.download_button("⬇ raw traces (CSV)", raw_df.to_csv(index=False).encode(),
                        "all_cells_raw.csv", "text/csv")
     st.download_button("⬇ ΔF/F0 traces — current cell set (CSV)", dff_df.to_csv(index=False).encode(),
@@ -705,4 +867,3 @@ with tabs[7]:
     if "gif_path" in ss and os.path.exists(ss["gif_path"]):
         with open(ss["gif_path"], "rb") as fh:
             st.download_button("⬇ overlay GIF", fh.read(), "registration_overlay.gif", "image/gif")
-    st.caption(f"Outputs folder: {trial}_output")

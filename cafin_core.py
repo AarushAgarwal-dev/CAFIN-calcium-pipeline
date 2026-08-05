@@ -256,23 +256,145 @@ def register_series(memf, caf, mem_base, ca_base, num_frames, method,
 
 
 # ============================================================ SEGMENTATION
-def cuda_status():
-    """Returns (available: bool, message: str). GPU acceleration applies to the
-    Cellpose (torch) segmentation step; the registration backends are CPU."""
+def gpu_status():
+    """Detect a usable torch GPU backend for the Cellpose segmentation step.
+    Returns (available: bool, message: str, backend: str).
+
+    Supported backends:
+      cuda      NVIDIA
+      rocm      AMD on Linux (ROCm torch builds report through the CUDA API)
+      directml  AMD / Intel GPUs on Windows, via `pip install torch-directml`
+      mps       Apple Silicon
+    Registration (OpenCV ECC, itk-elastix) is CPU-only regardless of this.
+    """
     try:
         import torch
     except Exception as e:
-        return False, f"torch not importable ({e})"
-    if torch.cuda.is_available():
+        return False, f"torch not importable ({e})", "none"
+
+    # CUDA covers both NVIDIA and AMD ROCm builds of torch
+    try:
+        if torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name(0)
+            except Exception:
+                name = "GPU"
+            if getattr(torch.version, "hip", None):
+                return True, f"AMD ROCm — {name} (torch {torch.__version__})", "rocm"
+            return True, f"NVIDIA CUDA — {name} (torch {torch.__version__})", "cuda"
+    except Exception:
+        pass
+
+    # DirectML: AMD and Intel GPUs on Windows
+    try:
+        import torch_directml
+        if torch_directml.is_available() and torch_directml.device_count() > 0:
+            try:
+                name = torch_directml.device_name(0)
+            except Exception:
+                name = "DirectML device"
+            return True, f"AMD/Intel DirectML — {name}", "directml"
+    except Exception:
+        pass
+
+    # Apple Silicon
+    try:
+        if torch.backends.mps.is_available():
+            return True, "Apple MPS GPU", "mps"
+    except Exception:
+        pass
+
+    # Nothing usable: give a platform-appropriate hint
+    import sys as _sys
+    vendor = _gpu_vendor_hint()
+    if _sys.platform.startswith("win") and vendor in ("amd", "intel", "unknown"):
+        hint = ("For an AMD or Intel GPU on Windows install DirectML:\n"
+                "    pip install torch-directml\n"
+                "(NVIDIA instead: pip install torch --index-url "
+                "https://download.pytorch.org/whl/cu124)")
+    elif vendor == "amd":
+        hint = ("For an AMD GPU on Linux install a ROCm build:\n"
+                "    pip install torch --index-url https://download.pytorch.org/whl/rocm6.2")
+    else:
+        hint = ("Install a CUDA build:\n"
+                "    pip install torch --index-url https://download.pytorch.org/whl/cu124")
+    build = "CPU-only build" if "+cpu" in torch.__version__ else "no GPU backend"
+    return False, f"No GPU backend ({build}, torch {torch.__version__}).\n{hint}", "none"
+
+
+def _gpu_vendor_hint():
+    """Best-effort GPU vendor detection ('amd' | 'nvidia' | 'intel' | 'unknown'),
+    used only to print a helpful install hint."""
+    try:
+        import cv2
+        cv2.ocl.setUseOpenCL(True)
+        if cv2.ocl.haveOpenCL():
+            v = (cv2.ocl.Device_getDefault().vendorName() or "").lower()
+            if "advanced micro" in v or "amd" in v:
+                return "amd"
+            if "nvidia" in v:
+                return "nvidia"
+            if "intel" in v:
+                return "intel"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def torch_device(backend=None):
+    """Return a torch.device for the given backend (auto-detected if None), else None."""
+    try:
+        import torch
+    except Exception:
+        return None
+    if backend is None:
+        ok, _, backend = gpu_status()
+        if not ok:
+            return None
+    if backend in ("cuda", "rocm"):
+        return torch.device("cuda")
+    if backend == "mps":
+        return torch.device("mps")
+    if backend == "directml":
         try:
-            name = torch.cuda.get_device_name(0)
+            import torch_directml
+            return torch_directml.device()
         except Exception:
-            name = "CUDA device"
-        return True, f"CUDA available — {name} (torch {torch.__version__})"
-    build = "CPU-only build" if "+cpu" in torch.__version__ else "no CUDA device"
-    return False, (f"CUDA not available ({build}, torch {torch.__version__}). "
-                   "Install a CUDA build, e.g. "
-                   "`pip install torch --index-url https://download.pytorch.org/whl/cu124`")
+            return None
+    return None
+
+
+def cuda_status():
+    """Backward-compatible wrapper: (available, message) for any GPU backend."""
+    ok, msg, _ = gpu_status()
+    return ok, msg
+
+
+def build_cellpose(gpu=False, model_type="cyto3"):
+    """Create a CellposeModel on the best available device.
+    Returns (model, use_channels, backend). `backend` is 'cpu' when no GPU is used."""
+    from cellpose import models
+    dev, backend = None, "cpu"
+    if gpu:
+        ok, _, be = gpu_status()
+        if ok:
+            dev = torch_device(be)
+            if dev is not None:
+                backend = be
+    kw = {"gpu": dev is not None}
+    if dev is not None:
+        kw["device"] = dev                       # CUDA / ROCm / DirectML / MPS device
+    try:                                         # Cellpose 3.x API (cyto3 + channels)
+        return models.CellposeModel(model_type=model_type, **kw), True, backend
+    except TypeError:                            # Cellpose 4.x (cpsam, no model_type/channels)
+        return models.CellposeModel(**kw), False, backend
+
+
+def _cp_eval(model, img8, diameter, use_ch):
+    kw = dict(diameter=diameter, flow_threshold=0.4, cellprob_threshold=0.0)
+    if use_ch:
+        kw["channels"] = [2, 0]
+    return model.eval(img8, **kw)[0]
 
 
 def segment(reg_mem0, diameter=15, gpu=False, model_type="cyto3"):
@@ -284,19 +406,14 @@ def segment(reg_mem0, diameter=15, gpu=False, model_type="cyto3"):
     the manuscript settings when the installed version supports them and otherwise
     falls back to the 4.x default, so segmentation runs on either version.
     """
-    from cellpose import models
-    use_gpu = bool(gpu) and cuda_status()[0]     # only use GPU if actually available
     img8 = stretch8(reg_mem0, clahe=True)        # local contrast helps boundary detection
-    # Try the manuscript's Cellpose 3.x API (cyto3 + channels=[2,0]); fall back to 4.x.
+    model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
     try:
-        model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
-        masks = model.eval(img8, diameter=diameter, channels=[2, 0],
-                           flow_threshold=0.4, cellprob_threshold=0.0)[0]
-    except TypeError:
-        model = models.CellposeModel(gpu=use_gpu)   # Cellpose 4.x (cpsam)
-        masks = model.eval(img8, diameter=diameter,
-                           flow_threshold=0.4, cellprob_threshold=0.0)[0]
-    return np.asarray(masks).astype(np.int32), use_gpu
+        masks = _cp_eval(model, img8, diameter, use_ch)
+    except Exception:                            # GPU backend failed -> redo on CPU
+        model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+        masks = _cp_eval(model, img8, diameter, use_ch)
+    return np.asarray(masks).astype(np.int32), (backend != "cpu")
 
 
 def _clean_mask(mask, min_area=60, fill_holes=True):
@@ -319,26 +436,19 @@ def segment_stack(images, diameter=15, gpu=False, model_type="cyto3",
     """Segment EVERY frame independently (needed for true cell tracking).
     `images` is a list/iterable of 2-D membrane frames. Builds the Cellpose model
     once and evaluates each frame. Returns (T,H,W) int array of cleaned masks."""
-    from cellpose import models
-    use_gpu = bool(gpu) and cuda_status()[0]
     imgs = [stretch8(im, clahe=True) for im in images]
-    try:
-        model = models.CellposeModel(gpu=use_gpu, model_type=model_type)
-        use_ch = True
-    except TypeError:
-        model = models.CellposeModel(gpu=use_gpu)
-        use_ch = False
+    model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
     out = []
     n = len(imgs)
     for k, im in enumerate(imgs):
-        kw = dict(diameter=diameter, flow_threshold=0.4, cellprob_threshold=0.0)
-        if use_ch:
-            kw["channels"] = [2, 0]
-        m = model.eval(im, **kw)[0]
+        try:
+            m = _cp_eval(model, im, diameter, use_ch)
+        except Exception:                        # GPU backend failed -> continue on CPU
+            model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+            m = _cp_eval(model, im, diameter, use_ch)
         out.append(_clean_mask(np.asarray(m).astype(np.int32), min_area=min_area))
         if progress:
-            progress((k + 1) / max(1, n), f"Segmenting frame {k + 1}/{n}")
-    h, w = out[0].shape
+            progress((k + 1) / max(1, n), f"Segmenting frame {k + 1}/{n} ({backend})")
     return np.stack(out).astype(np.int32)
 
 
