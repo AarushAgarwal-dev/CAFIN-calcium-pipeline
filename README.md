@@ -7,6 +7,27 @@ produces per-cell ΔF/F0 traces, tissue-level statistics, figures, and a generat
 manuscript. There is also a Streamlit GUI for interactive work, with registration playback,
 cell tracking, trace clustering, and optional AI interpretation.
 
+## Quick start
+
+One line. It downloads the code, installs everything (including the right PyTorch for your
+graphics card), and opens the app in your browser.
+
+**macOS or Linux:**
+
+```bash
+git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git && cd CAFIN-calcium-pipeline && python3 install.py --launch
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git; cd CAFIN-calcium-pipeline; python install.py --launch
+```
+
+You need Python 3.9 or newer and git. Already have the folder? Just run `python install.py --launch`
+inside it. Next time, start the app with `streamlit run cafin_gui.py`, or double-click
+`run_gui.bat` on Windows or `run_gui.command` on macOS.
+
 ## How it works
 
 The pipeline runs in eight steps.
@@ -36,24 +57,11 @@ The pipeline runs in eight steps.
 
 ## Installing
 
-The installer detects your operating system and graphics card, installs the matching build of
-PyTorch, then installs everything else. It works the same on Windows, macOS, and Linux.
+If you would rather not use a terminal, double-click `install_windows.bat` on Windows or
+`install_mac.command` on macOS. Both call the same installer.
 
-**Windows:** double-click `install_windows.bat`, or run it from a terminal.
-
-**macOS or Linux:** double-click `install_mac.command`, or run `bash install_mac.command`.
-
-**Any system, from a terminal:**
-
-```bash
-python install.py
-```
-
-Useful flags: `--venv` installs into a local `.venv` instead of your main Python, `--cpu` skips
-GPU detection, and `--launch` opens the GUI when the install finishes.
-
-Once installed, start the app by double-clicking `run_gui.bat` (Windows) or `run_gui.command`
-(macOS), or by running `streamlit run cafin_gui.py`.
+`install.py` takes a few flags: `--launch` opens the GUI when it finishes, `--venv` installs into a
+local `.venv` instead of your main Python, and `--cpu` skips GPU detection.
 
 To install by hand instead, use `pip install -r REPRODUCE/requirements.txt`. The core packages are
 numpy, pandas, scipy, matplotlib, scikit-image, opencv-python, tifffile, cellpose, and torch. The
@@ -78,6 +86,8 @@ falls back to the CPU and continues.
 An AMD card in an Intel Mac (a Radeon Pro 5500 XT in a 2019 Mac Pro or 2020 iMac, say) has no
 PyTorch GPU backend, since MPS requires Apple Silicon. That run stays on the CPU. The same card in
 a Windows machine works through DirectML.
+
+## Using it
 
 ### GUI
 
