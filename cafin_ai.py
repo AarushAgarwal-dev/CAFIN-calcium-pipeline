@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 
-DEFAULT_MODEL = "us.meta.llama3-3-70b-instruct-v1:0"
+DEFAULT_MODEL = "us.meta.llama4-maverick-17b-instruct-v1:0"
 
 
 def default_region():
@@ -66,12 +66,15 @@ def check_credentials(region: str | None = None):
         return False, f"AWS credential check failed: {type(e).__name__}: {str(e)[:160]}"
 
 # Open-source / open-weights Bedrock model ids for a GUI dropdown (most capable first).
+# Cross-region inference profiles need the "us." prefix; the bare id is rejected.
 MODEL_CHOICES = [
-    "us.meta.llama3-3-70b-instruct-v1:0",     # Llama 3.3 70B (open weights, Llama community license)
-    "us.meta.llama3-1-70b-instruct-v1:0",     # Llama 3.1 70B (open weights)
-    "mistral.mixtral-8x7b-instruct-v0:1",     # Mixtral 8x7B (Apache-2.0, fully open source)
-    "us.deepseek.r1-v1:0",                    # DeepSeek-R1 (MIT, open source; reasoning model)
-    "mistral.mistral-7b-instruct-v0:2",       # Mistral 7B (Apache-2.0)
+    "us.meta.llama4-maverick-17b-instruct-v1:0",  # Llama 4 Maverick (17B active, 128 experts)
+    "us.meta.llama4-scout-17b-instruct-v1:0",     # Llama 4 Scout (17B active, long context)
+    "us.meta.llama3-3-70b-instruct-v1:0",         # Llama 3.3 70B
+    "us.meta.llama3-1-70b-instruct-v1:0",         # Llama 3.1 70B
+    "us.deepseek.r1-v1:0",                        # DeepSeek-R1 (MIT, reasoning model)
+    "mistral.mixtral-8x7b-instruct-v0:1",         # Mixtral 8x7B (Apache-2.0)
+    "mistral.mistral-7b-instruct-v0:2",           # Mistral 7B (Apache-2.0)
 ]
 
 SYSTEM_PROMPT = (
@@ -181,3 +184,72 @@ def interpret_clusters(payload: dict, model_id: str = DEFAULT_MODEL,
             return False, ("Your AWS login session has EXPIRED. Run `aws login` in a terminal to "
                            "re-authenticate, then retry.")
         return False, f"Unexpected error calling Bedrock: {e}"
+
+
+# ------------------------------------------------------------------ follow-up chat
+CHAT_SYSTEM = (
+    "You are a quantitative cell biologist helping a researcher interpret single-cell calcium "
+    "(Ca2+) imaging of the zebrafish larval fin epithelium. The researcher clustered per-cell "
+    "ΔF/F0 traces with PCA + K-means. You are given the cluster statistics (and, when available, "
+    "the per-cluster time-series across all frames) plus any background the researcher supplied.\n\n"
+    "Answer their questions directly and quantitatively. Ground every numeric claim ONLY in the "
+    "data given; never invent values. When asked about initiators versus followers, reason from "
+    "the timing evidence: a cluster is an initiator if its activity rises earliest (high "
+    "activity_early relative to activity_mid/activity_late, or an early peak in its mean trace), "
+    "and a follower if it peaks later; cite the numbers you used and name the clusters by id and "
+    "colour. Say plainly when the data cannot settle a question, and suggest what analysis or "
+    "experiment would. Keep answers focused, a few short paragraphs at most."
+)
+
+
+def chat(payload, history, question, model_id=DEFAULT_MODEL, region=None,
+         background="", max_tokens=1200, temperature=0.3):
+    """Ask a follow-up question about the clustering results.
+
+    `history` is a list of {"role": "user"|"assistant", "text": ...} from earlier turns.
+    Returns (ok, answer_text). The cluster data and background are pinned in the system
+    prompt so every turn stays grounded in the same numbers.
+    """
+    region = region or DEFAULT_REGION
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+    except Exception as e:
+        return False, f"boto3 is not installed ({e}). Run: pip install boto3"
+
+    try:
+        client = boto3.client("bedrock-runtime", region_name=region)
+        ctx = CHAT_SYSTEM
+        if background and background.strip():
+            ctx += "\n\nResearcher background:\n" + background.strip()
+        ctx += "\n\nCluster data (JSON):\n```json\n" + json.dumps(payload, indent=2) + "\n```"
+
+        msgs = [{"role": h["role"], "content": [{"text": h["text"]}]}
+                for h in (history or []) if h.get("text")]
+        msgs.append({"role": "user", "content": [{"text": question}]})
+        cfg = {"maxTokens": max_tokens, "temperature": temperature}
+
+        try:
+            resp = client.converse(modelId=model_id, system=[{"text": ctx}],
+                                   messages=msgs, inferenceConfig=cfg)
+        except Exception as e:
+            if "system" in str(e).lower():          # model rejects a system field
+                merged = list(msgs)
+                merged[0] = {"role": "user",
+                             "content": [{"text": ctx + "\n\n" + merged[0]["content"][0]["text"]}]}
+                resp = client.converse(modelId=model_id, messages=merged, inferenceConfig=cfg)
+            else:
+                raise
+        parts = resp["output"]["message"]["content"]
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return True, text or "(model returned no text)"
+    except NoCredentialsError:
+        return False, "No AWS credentials found. Run `aws login` (or `aws configure`)."
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "ClientError")
+        return False, f"Bedrock error [{code}]: {e.response.get('Error', {}).get('Message', str(e))}"
+    except (BotoCoreError, Exception) as e:
+        if _looks_like_login_expired(e):
+            return False, ("Your AWS login session has EXPIRED. Run `aws login` in a terminal, "
+                           "then retry.")
+        return False, f"Error calling Bedrock: {e}"

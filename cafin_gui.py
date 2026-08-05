@@ -1,16 +1,17 @@
 """
 CAFIN Calcium Analysis GUI  (Streamlit)
 =======================================
-Motion correction -> segmentation -> ΔF/F0 -> statistics, all inline.
+Motion correction -> segmentation -> ΔF/F0i -> statistics, all inline.
 
 Run:
     streamlit run cafin_gui.py
 
 Registration / analysis methods (choose one):
-    * Rigid           OpenCV ECC (global rotation+translation)
-    * Elastic         SimpleITK B-spline (non-rigid; the elastix-equivalent that runs here)
-    * Cell tracking   the frame-0 mask is warped into every frame so each cell is followed
-Extras: interactive ROI selection, frame navigation + auto-loop, PCA trace clustering.
+    * Rigid           OpenCV ECC (global rotation + translation)
+    * Elastic         itk-elastix B-spline (non-rigid)
+    * Cell tracking   every frame is segmented and cells are linked into stable IDs
+Extras: data preview, interactive ROI selection (before or after a run), frame navigation
+with auto-loop, PCA + K-means trace clustering, and optional AI interpretation via Bedrock.
 """
 import os, glob, re, time
 import numpy as np
@@ -57,6 +58,101 @@ def _draw_box(gray_u8, box, color=(255, 235, 0), t=2):
     rgb[y1:y2, x1:x1 + t] = color; rgb[y1:y2, max(0, x2 - t):x2] = color
     rgb[y1:y1 + t, x1:x2] = color; rgb[max(0, y2 - t):y2, x1:x2] = color
     return rgb
+
+
+def color_name(rgb):
+    """Name a colour from its actual RGB, so the label always matches what is drawn."""
+    import colorsys
+    r, g, b = [float(v) / 255.0 for v in rgb[:3]]
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    hd = h * 360
+    if s < 0.12:                                    # unsaturated
+        return "black" if v < 0.25 else ("white" if v > 0.93 else
+                                         ("light gray" if v > 0.6 else "gray"))
+    if hd < 15 or hd >= 345: base = "red"
+    elif hd < 40:  base = "orange"
+    elif hd < 65:  base = "yellow"
+    elif hd < 95:  base = "olive"
+    elif hd < 160: base = "green"
+    elif hd < 200: base = "teal"
+    elif hd < 255: base = "blue"
+    elif hd < 290: base = "purple"
+    elif hd < 330: base = "magenta"
+    else:          base = "pink"
+    if base in ("red", "orange"):                   # dark/desaturated warm tones read as brown
+        if v < 0.65 and s > 0.30:
+            return "brown"
+        if s < 0.35 and v < 0.88:
+            return "light brown"
+    if v > 0.80 and s < 0.55:
+        return "light " + base
+    if v < 0.45:
+        return "dark " + base
+    return base
+
+
+def cluster_palette(k):
+    """Return (colors, names) with one entry per cluster. tab20 keeps 20 clearly
+    distinct, nameable colours; beyond that we spread hues so clusters stay
+    visually separable. Names are derived from the colours and de-duplicated."""
+    if k <= 20:
+        cols = (plt.get_cmap("tab20")(np.linspace(0, 1, 20)) * 255)[:, :3][:max(k, 1)]
+    else:
+        cols = (plt.get_cmap("hsv")(np.linspace(0, 1, k, endpoint=False)) * 255)[:, :3]
+    names, seen = [], {}
+    for c in cols:
+        n = color_name(c)
+        seen[n] = seen.get(n, 0) + 1
+        names.append(n if seen[n] == 1 else f"{n} {seen[n]}")
+    return cols, names
+
+
+def roi_box_selector(gray, key, current_box=None):
+    """Drag-a-rectangle selector over a grayscale frame (Plotly box-select).
+    Returns a new (x1, y1, x2, y2) when the user has just dragged one, else None.
+    Falls back to numeric inputs if Plotly is unavailable."""
+    H, W = gray.shape
+    try:
+        import plotly.graph_objects as go
+        step = max(3, W // 120)                          # invisible selectable grid
+        yy, xx = np.mgrid[0:H:step, 0:W:step]
+        fig = go.Figure(go.Image(z=np.dstack([gray] * 3)))
+        fig.add_trace(go.Scattergl(x=xx.ravel(), y=yy.ravel(), mode="markers",
+                                   marker=dict(size=step, opacity=0), hoverinfo="skip",
+                                   showlegend=False))
+        if current_box:
+            x1, y1, x2, y2 = current_box
+            fig.add_shape(type="rect", x0=x1, y0=y1, x1=x2, y1=y2,
+                          line=dict(color="#ffeb00", width=2), fillcolor="rgba(255,235,0,0.15)")
+        fig.update_xaxes(visible=False, range=[0, W]); fig.update_yaxes(visible=False, range=[H, 0])
+        fig.update_layout(dragmode="select", margin=dict(l=0, r=0, t=0, b=0),
+                          height=min(560, int(560 * H / W)) if W else 512)
+        ev = st.plotly_chart(fig, on_select="rerun", selection_mode="box",
+                             width="stretch", key=key)
+        pts = []
+        try:
+            pts = ev["selection"]["points"]
+        except Exception:
+            try:
+                pts = ev.selection.points
+            except Exception:
+                pts = []
+        if pts:
+            xs = [p["x"] for p in pts]; ys = [p["y"] for p in pts]
+            return (int(max(0, min(xs))), int(max(0, min(ys))),
+                    int(min(W, max(xs))), int(min(H, max(ys))))
+        return None
+    except Exception as e:
+        st.error(f"Interactive selector unavailable ({e}). Enter ROI bounds manually:")
+        cur = current_box or (W // 4, H // 4, 3 * W // 4, 3 * H // 4)
+        cA = st.columns(4)
+        x1 = cA[0].number_input("x1", 0, W, int(cur[0]), key=key + "_x1")
+        y1 = cA[1].number_input("y1", 0, H, int(cur[1]), key=key + "_y1")
+        x2 = cA[2].number_input("x2", 0, W, int(cur[2]), key=key + "_x2")
+        y2 = cA[3].number_input("y2", 0, H, int(cur[3]), key=key + "_y2")
+        st.image(_draw_box(gray, (x1, y1, x2, y2)), width="stretch")
+        box = (x1, y1, x2, y2)
+        return box if box != tuple(current_box or ()) else None
 
 
 def pick_folder(initial=None, title="Select folder"):
@@ -133,7 +229,7 @@ def detect_base(folder):
 
 # =========================================================== SIDEBAR
 st.sidebar.title("CAFIN pipeline")
-st.sidebar.caption("Motion correction → segmentation → ΔF/F0 → statistics")
+st.sidebar.caption("Motion correction → segmentation → ΔF/F0i → statistics")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if "trial_path" not in ss:
@@ -231,9 +327,13 @@ with st.sidebar.expander("Advanced parameters", expanded=False):
     frame_step = st.number_input("Process every Nth frame (speed)", 1, 20, 1)
     max_frames = st.number_input("Max frames (0 = all)", 0, 2000, 0)
     do_bg = st.checkbox("Background subtraction (auto regions)", value=False)
-    dff_method = st.selectbox("ΔF/F0 baseline (F0)", ["lowest", "first", "last"], index=0)
-    f0_floor = st.number_input("F0 floor (avoid divide-by-tiny)", 0.1, 100.0, 1.0)
-    peak_thr = st.number_input("Peak threshold (ΔF/F0)", 0.0, 5.0, 0.5, 0.1)
+    dff_method = st.selectbox("Baseline for F0i", ["percell", "min", "lowest", "first", "last"],
+                              index=0,
+                              help="percell: each cell uses its own lowest frames. "
+                                   "min: that cell's single lowest value. "
+                                   "lowest/first/last: one shared window for every cell.")
+    f0_floor = st.number_input("F0i floor (avoid divide-by-tiny)", 0.1, 100.0, 1.0)
+    peak_thr = st.number_input("Peak threshold (ΔF/F0i)", 0.0, 5.0, 0.5, 0.1)
 
 roi_on = st.sidebar.checkbox("Restrict analysis to a region of interest (ROI)", value=False,
                              help="Draw a rectangle below; cells intersecting it are analyzed.")
@@ -260,50 +360,16 @@ if roi_on and ok_data:
         else:
             H, W = first_ca.shape
             gray = cc.stretch8(first_ca, clahe=True)
-            rgb = np.dstack([gray] * 3)
-            try:
-                import plotly.graph_objects as go
-                st.caption("Use the **box-select** cursor (default) and **drag a rectangle** on the "
-                           "image. Drag again to replace it. Then click **Run analysis**.")
-                step = max(3, W // 120)                       # invisible selectable grid
-                yy, xx = np.mgrid[0:H:step, 0:W:step]
-                fig = go.Figure(go.Image(z=rgb))
-                fig.add_trace(go.Scattergl(x=xx.ravel(), y=yy.ravel(), mode="markers",
-                                           marker=dict(size=step, opacity=0), hoverinfo="skip",
-                                           showlegend=False))
-                if ss.get("roi_box"):
-                    x1, y1, x2, y2 = ss["roi_box"]
-                    fig.add_shape(type="rect", x0=x1, y0=y1, x1=x2, y1=y2,
-                                  line=dict(color="#ffeb00", width=2), fillcolor="rgba(255,235,0,0.15)")
-                fig.update_xaxes(visible=False, range=[0, W]); fig.update_yaxes(visible=False, range=[H, 0])
-                fig.update_layout(dragmode="select", margin=dict(l=0, r=0, t=0, b=0),
-                                  height=min(560, int(560 * H / W)) if W else 512)
-                ev = st.plotly_chart(fig, on_select="rerun", selection_mode="box",
-                                     width="stretch", key="roi_plot")
-                pts = []
-                try:
-                    pts = ev["selection"]["points"]
-                except Exception:
-                    try:
-                        pts = ev.selection.points
-                    except Exception:
-                        pts = []
-                if pts:
-                    xs = [p["x"] for p in pts]; yr = [p["y"] for p in pts]
-                    ss["roi_box"] = (int(max(0, min(xs))), int(max(0, min(yr))),
-                                     int(min(W, max(xs))), int(min(H, max(yr))))
-                if ss.get("roi_box"):
-                    b = ss["roi_box"]
-                    st.success(f"ROI set — x[{b[0]},{b[2]}] y[{b[1]},{b[3]}]. Click **Run analysis**.")
-                else:
-                    st.info("No box drawn yet — drag a rectangle on the image above.")
-            except Exception as e:                           # plotly unavailable -> numeric fallback
-                st.error(f"Interactive selector unavailable ({e}). Enter ROI bounds manually:")
-                cA = st.columns(4)
-                x1 = cA[0].number_input("x1", 0, W, W // 4); y1 = cA[1].number_input("y1", 0, H, H // 4)
-                x2 = cA[2].number_input("x2", 0, W, 3 * W // 4); y2 = cA[3].number_input("y2", 0, H, 3 * H // 4)
-                ss["roi_box"] = (x1, y1, x2, y2)
-                st.image(_draw_box(gray, ss["roi_box"]), width="stretch")
+            st.caption("Drag a rectangle on the image to set the ROI. Drag again to replace it. "
+                       "You can also set or change it after the analysis, in the ROI tab.")
+            _newb = roi_box_selector(gray, "roi_plot", ss.get("roi_box"))
+            if _newb:
+                ss["roi_box"] = _newb
+            if ss.get("roi_box"):
+                b = ss["roi_box"]
+                st.success(f"ROI set — x[{b[0]},{b[2]}] y[{b[1]},{b[3]}]. Click **Run analysis**.")
+            else:
+                st.info("No box drawn yet — drag a rectangle on the image above.")
 
 
 # =========================================================== PREVIEW (before analysis)
@@ -366,7 +432,7 @@ if run:
             reg["mask_per_frame"] = {f: tracked[k] for k, f in enumerate(frames)}
             ca_by_frame = {f: reg["reg_ca"][f] for f in frames if f in reg["reg_ca"]}
             st.write(f"→ {tstats['n_tracks']} tracks ({tstats['full_coverage']} full-coverage). "
-                     f"Extracting ΔF/F0 …")
+                     f"Extracting ΔF/F0i …")
             raw_df = cc.extract_tracked_traces(reg["mask_per_frame"], ca_by_frame, frames, bg=do_bg)
             eff_handling = "tracking"
         else:                                                 # ---- static / warp-tracking ----
@@ -379,7 +445,7 @@ if run:
                                      do_tracking=(handling == "tracking"), mask0=mask0,
                                      frame_step=frame_step, elastic_quality=elastic_quality,
                                      progress=lambda f, m: prog.progress(min(f, 1.0), text=m))
-            st.write("Extracting traces + ΔF/F0 …")
+            st.write("Extracting traces + ΔF/F0i …")
             raw_df = cc.extract_traces(reg, mask0, handling, bg=do_bg)
             eff_handling = handling
 
@@ -388,12 +454,14 @@ if run:
             roi_ids = cc.roi_cell_ids(mask0, ss["roi_box"])
             st.write(f"→ ROI: {len(roi_ids)} of {int(mask0.max())} cells intersect the rectangle.")
 
-        dff_df, base = cc.compute_dff0(raw_df, method=dff_method, floor=f0_floor)
+        dff_df, base, f0i = cc.compute_dff0(raw_df, method=dff_method, floor=f0_floor,
+                                            return_f0=True)
         status.update(label="Done", state="complete", expanded=False)
     prog.empty()
     ss["res"] = dict(reg=reg, mask0=mask0, raw=raw_df, dff=dff_df, base=base, mode=choice,
                      method=method, handling=eff_handling, link=link_tracking, tstats=tstats,
-                     mem_base=mem_base, roi_ids=roi_ids,
+                     mem_base=mem_base, ca_base=ca_base, roi_ids=roi_ids,
+                     f0_floor=f0_floor, dff_method=dff_method, do_bg=do_bg, f0i=f0i,
                      roi_box=ss.get("roi_box") if roi_on else None, peak_thr=peak_thr)
     ss["frame_idx"] = None  # reset navigation
 
@@ -406,31 +474,51 @@ reg, mask0, raw_df, dff_all = R["reg"], R["mask0"], R["raw"], R["dff"]
 frames = reg["frames"]
 peak_thr = R["peak_thr"]
 
-# ------------------------ ROI-aware cell set
+# ------------------------ general vs ROI cell sets
 roi_ids = R.get("roi_ids")
+dff_roi = None
 if roi_ids:
-    pick = st.radio("Cell set", [f"ROI cells ({len(roi_ids)})", "All cells"], horizontal=True, index=0)
-    if pick.startswith("ROI"):
-        keep = ["Frame"] + [f"Cell_{i}" for i in roi_ids if f"Cell_{i}" in dff_all.columns]
-        dff_df = dff_all[keep]
-    else:
-        dff_df = dff_all
-else:
-    dff_df = dff_all
-stats, dist = cc.metrics(dff_df, threshold=peak_thr)
+    _keep = ["Frame"] + [f"Cell_{i}" for i in roi_ids if f"Cell_{i}" in dff_all.columns]
+    if len(_keep) > 1:
+        dff_roi = dff_all[_keep]
+dff_df = dff_all                                   # general set, used for headline and exports
+stats, dist = cc.metrics(dff_all, threshold=peak_thr)
 
-# headline metrics
+
+def roi_split(render, key):
+    """Show the general (all-cell) view, and when an ROI is set add a second
+    sub-tab with the same analysis restricted to the ROI cells."""
+    if dff_roi is not None:
+        _a, _b = st.tabs(["All cells", f"ROI cells ({len(roi_ids)})"])
+        with _a:
+            render(dff_all, key + "_all")
+        with _b:
+            render(dff_roi, key + "_roi")
+    else:
+        render(dff_all, key + "_all")
+
+
+# headline metrics (whole field)
 c = st.columns(4)
 c[0].metric("Cells", stats["cells"])
 c[1].metric("Active %", stats["active_pct"])
-c[2].metric("Mean peak ΔF/F0", stats["mean_peak_dff0"])
+c[2].metric("Mean peak ΔF/F0i", stats["mean_peak_dff0"])
 c[3].metric("Sync (r)", stats["temporal_sync_r"])
+if dff_roi is not None:
+    st.caption(f"An ROI is set ({len(roi_ids)} cells). The data tabs below each have an "
+               "**ROI cells** sub-tab next to the general **All cells** view.")
 
-tabs = st.tabs(["🎞 Registration + movie", "🧫 Segmentation", "🎯 ROI", "📈 Traces / ΔF/F0",
-                "🧩 Clustering", "🎯 Tracking", "📊 Statistics", "⬇ Downloads"])
+TAB_REG, TAB_SEG, TAB_ROI = "🎞 Registration", "🧫 Segmentation", "🎯 ROI"
+TAB_TRC, TAB_CLU, TAB_STA = "📈 Traces / ΔF/F0i", "🧩 Clustering", "📊 Statistics"
+TAB_TRK, TAB_DL = "🎯 Tracking", "⬇ Downloads"
+_names = [TAB_REG, TAB_SEG, TAB_ROI, TAB_TRC, TAB_STA, TAB_CLU]
+if R["handling"] == "tracking":                    # only present when tracking was used
+    _names.append(TAB_TRK)
+_names.append(TAB_DL)
+T = dict(zip(_names, st.tabs(_names)))
 
 # ---------------------------------------------------------- Registration + movie
-with tabs[0]:
+with T[TAB_REG]:
     st.subheader("Overlay  (green = frame 0, magenta = moving, white = aligned)")
     fr = [f for f in frames if f != 0] or frames
     n = len(fr)
@@ -473,7 +561,7 @@ with tabs[0]:
         st.rerun()
 
 # ---------------------------------------------------------- Segmentation
-with tabs[1]:
+with T[TAB_SEG]:
     st.subheader(f"Cellpose segmentation — {int(mask0.max())} cells")
     st.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
              caption="Frame-0 membrane with numbered cell ROIs", width="stretch")
@@ -492,7 +580,24 @@ with tabs[1]:
     frame_loop("seg", sfi, splay, sspd, len(frames))
 
 # ---------------------------------------------------------- ROI tab
-with tabs[2]:
+with T[TAB_ROI]:
+    # ---- set or change the ROI now, without re-running the pipeline ----
+    with st.expander("✏️  Select or change the ROI", expanded=not R.get("roi_box")):
+        st.caption("Drag a rectangle to set the ROI. This re-filters the traces that were already "
+                   "extracted, so there is no need to run the analysis again.")
+        _ca0 = reg["reg_ca"].get(frames[0], reg["reg_mem"][frames[0]])
+        _newroi = roi_box_selector(cc.stretch8(_ca0, clahe=True), "roi_plot_post", R.get("roi_box"))
+        if _newroi:
+            R["roi_box"] = _newroi
+            R["roi_ids"] = cc.roi_cell_ids(mask0, _newroi)
+            ss["roi_box"] = _newroi
+            st.rerun()
+        if R.get("roi_box"):
+            if st.button("Clear ROI (use all cells)"):
+                R["roi_box"] = None
+                R["roi_ids"] = None
+                st.rerun()
+
     if R.get("roi_box"):
         st.subheader(f"Region of interest — {len(roi_ids)} cells intersect the rectangle")
         x1, y1, x2, y2 = R["roi_box"]
@@ -512,59 +617,206 @@ with tabs[2]:
                  width="stretch")
         frame_loop("roiv", rfi, rplay, rspd, len(frames))
     else:
-        st.info("Enable **Restrict analysis to a region of interest** in the sidebar, draw a "
-                "rectangle above the Run button, then re-run.")
+        st.info("No ROI set. Drag a rectangle in the panel above to restrict the analysis to a "
+                "region; the traces are already extracted, so it applies straight away.")
 
 # ---------------------------------------------------------- Traces
-with tabs[3]:
-    st.subheader("Per-cell ΔF/F0 traces")
-    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
-    tfi, tplay, tspd = frame_controls("trc", len(frames))
+def render_traces(df, sfx):
+    cells = [c for c in df.columns if c.startswith("Cell_")]
+    st.subheader(f"Traces before and after normalization ({len(cells)} cells)")
+    tfi, tplay, tspd = frame_controls("trc" + sfx, len(frames))
     tf = frames[tfi]
-    fig, ax = plt.subplots(figsize=(11, 4))
-    for cn in cells:
-        ax.plot(dff_df["Frame"], dff_df[cn], lw=0.4, alpha=0.25, color="steelblue")
-    ax.plot(dff_df["Frame"], dff_df[cells].mean(axis=1), lw=2.2, color="crimson", label="population mean")
-    for f in R["base"]:
-        ax.axvspan(f - 0.5, f + 0.5, color="gold", alpha=0.12)
-    ax.axvline(tf, color="black", lw=1.5, alpha=0.8, label=f"frame {tf}")     # looping cursor
-    ax.set_xlabel("Frame"); ax.set_ylabel("ΔF/F0"); ax.legend(); ax.grid(alpha=0.3)
-    ax.set_title("gold = baseline (F0) frames")
-    st.pyplot(fig)
+
+    # matching RAW (pre-normalization) columns for the same cells
+    raw_cols = [c for c in cells if c in raw_df.columns]
+    raw_sub = raw_df[["Frame"] + raw_cols]
+    base_rows = R.get("base") or []               # shared window, empty for per-cell methods
+    f0_floor = float(R.get("f0_floor", 1.0))
+    _meth = R.get("dff_method", "percell")
+    # the exact per-cell F0i that compute_dff0 used for this run
+    f0i = R.get("f0i") or cc.f0_per_cell(raw_df, method=_meth, floor=f0_floor)
+    f0_tbl = pd.DataFrame([
+        {"cell": int(c.split("_")[1]),
+         "F0i_used": float(f0i[c][0]),
+         "baseline_frames": ",".join(str(frames[r]) for r in f0i[c][1] if r < len(frames))}
+        for c in raw_cols if c in f0i])
+
+    p1, p2 = st.columns(2)
+    with p1:
+        fig0, ax0 = plt.subplots(figsize=(6, 3.6))
+        for cn in raw_cols:
+            ax0.plot(raw_sub["Frame"], raw_sub[cn], lw=0.4, alpha=0.22, color="dimgray")
+        ax0.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=2, color="black",
+                 label="population mean")
+        for r in base_rows:                       # baseline rows used for F_ref
+            if r < len(frames):
+                ax0.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
+        ax0.axvline(tf, color="crimson", lw=1.4, alpha=0.85)
+        ax0.set_xlabel("Frame"); ax0.set_ylabel("raw intensity (a.u.)")
+        ax0.set_title("BEFORE normalization (raw)", fontsize=10)
+        ax0.legend(fontsize=7); ax0.grid(alpha=0.3)
+        st.pyplot(fig0)
+    with p2:
+        fig, ax = plt.subplots(figsize=(6, 3.6))
+        for cn in cells:
+            ax.plot(df["Frame"], df[cn], lw=0.4, alpha=0.22, color="steelblue")
+        ax.plot(df["Frame"], df[cells].mean(axis=1), lw=2, color="crimson",
+                label="population mean")
+        for r in base_rows:
+            if r < len(frames):
+                ax.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
+        ax.axvline(tf, color="black", lw=1.4, alpha=0.85)
+        ax.set_xlabel("Frame"); ax.set_ylabel("ΔF/F0i")
+        ax.set_title("AFTER normalization (ΔF/F0i)", fontsize=10)
+        ax.legend(fontsize=7); ax.grid(alpha=0.3)
+        st.pyplot(fig)
+    if base_rows:
+        st.caption(f"Gold band = the {len(base_rows)} shared baseline frames (method: {_meth}). "
+                   f"Red/black line = current frame {tf}.")
+    else:
+        st.caption(f"Each cell uses its own baseline frames (method: {_meth}), so there is no single "
+                   f"band to shade. See the F0i panel below. Red/black line = current frame {tf}.")
+
+    # ---------------- F0i actually used, per cell ----------------
+    with st.expander(f"F0i per cell  (ΔF/F0i = (F − F0i) / F0i,  floor {f0_floor:g})", expanded=False):
+        if _meth in ("percell", "min"):
+            st.markdown(
+                "**Every cell is normalised by its own F0i.** F0i is that cell's baseline "
+                + ("(the mean of its own lowest frames)." if _meth == "percell"
+                   else "(its single lowest value).")
+                + " Cells that are quiet early and cells that are quiet late each get their own "
+                  "resting level, rather than sharing one window picked from the population average."
+            )
+        else:
+            st.warning(
+                f"The **{_meth}** method gives every cell the *same* baseline frames "
+                f"({min(base_rows)}–{max(base_rows)} of {len(frames)}), so a cell that is active "
+                f"during that window is normalised by an inflated baseline. Switch to **percell** "
+                f"for a true per-cell F0i."
+            )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Baseline frames / cell",
+                  len(base_rows) if base_rows else len(next(iter(f0i.values()))[1]))
+        m2.metric("Median F0i", f"{f0_tbl['F0i_used'].median():.1f}")
+        m3.metric("F0i range", f"{f0_tbl['F0i_used'].min():.0f}–{f0_tbl['F0i_used'].max():.0f}")
+        m4.metric("Cells at floor", int((f0_tbl["F0i_used"] <= f0_floor + 1e-9).sum()))
+        fg, ag = plt.subplots(1, 2, figsize=(11, 2.8))
+        ag[0].hist(f0_tbl["F0i_used"].dropna(), bins=40, color="darkseagreen",
+                   edgecolor="black", lw=0.4)
+        ag[0].set_xlabel("F0i used (raw intensity)"); ag[0].set_ylabel("cells"); ag[0].grid(alpha=0.3)
+        ag[0].set_title("F0i distribution across cells", fontsize=9)
+        # which frames end up serving as baseline, across all cells
+        _use = np.zeros(len(frames))
+        for c in f0_tbl["cell"]:
+            for r in f0i[f"Cell_{c}"][1]:
+                if r < len(_use):
+                    _use[r] += 1
+        ag[1].bar(range(len(frames)), _use, color="steelblue")
+        ag[1].set_xlabel("Frame"); ag[1].set_ylabel("cells using it")
+        ag[1].set_title("how often each frame serves as baseline", fontsize=9); ag[1].grid(alpha=0.3)
+        fg.tight_layout()
+        st.pyplot(fg)
+        st.dataframe(f0_tbl.round(2), width="stretch", height=200)
+        st.download_button("⬇ per-cell F0i (CSV)", f0_tbl.to_csv(index=False).encode(),
+                           "f0i_values.csv", "text/csv", key="dlf0" + sfx)
+
+    # ---------------- dynamic background check ----------------
+    with st.expander("Background subtraction check (step through the frames)", expanded=True):
+        if not R.get("do_bg"):
+            st.info("Background subtraction was **off** for this run. The regions below show what "
+                    "would be sampled if you enable it in the sidebar and re-run.")
+        try:
+            ca_by_frame = {f: reg["reg_ca"][f] for f in frames if f in reg["reg_ca"]}
+            boxes = cc.auto_bg_boxes(ca_by_frame[frames[0]])
+            bgv = cc.background_values(ca_by_frame, boxes)
+            bfi, bplay, bspd = frame_controls("bgchk" + sfx, len(frames))
+            bf = frames[bfi]
+            # Fixed display scale across all frames (no CLAHE): a background check has to show
+            # ABSOLUTE intensity, and per-frame stretching/CLAHE would normalise away exactly
+            # the frame-to-frame changes we are trying to see.
+            _samp = np.concatenate([ca_by_frame[f][::4, ::4].ravel()
+                                    for f in frames if f in ca_by_frame])
+            _lo, _hi = np.percentile(_samp, [1, 99.5])
+            _span = max(float(_hi - _lo), 1.0)
+
+            def _fixed8(im):
+                return (np.clip((im.astype(np.float32) - _lo) / _span, 0, 1) * 255).astype(np.uint8)
+
+            g1, g2 = st.columns([1, 1])
+            with g1:
+                img = _fixed8(ca_by_frame[bf])
+                disp = np.dstack([img] * 3)
+                for (x1, y1, x2, y2) in boxes:
+                    disp[y1:y2, x1:x1 + 2] = [0, 229, 255]; disp[y1:y2, x2 - 2:x2] = [0, 229, 255]
+                    disp[y1:y1 + 2, x1:x2] = [0, 229, 255]; disp[y2 - 2:y2, x1:x2] = [0, 229, 255]
+                st.image(disp, caption=f"3 background regions on calcium frame {bf} "
+                                       f"(fixed intensity scale {_lo:.0f}–{_hi:.0f})",
+                         width="stretch")
+                _mean_bg, _per_box = bgv[bf]
+                q = st.columns(4)
+                q[0].metric(f"frame {bf} background", f"{_mean_bg:.1f}")
+                for _j, _v in enumerate(_per_box):
+                    q[_j + 1].metric(f"box {_j + 1}", f"{_v:.1f}")
+            with g2:
+                fb, ab = plt.subplots(figsize=(6, 3.4))
+                fr = [f for f in frames if f in bgv]
+                ab.plot(fr, [bgv[f][0] for f in fr], "-o", ms=3, color="teal", label="mean of 3")
+                for j in range(len(boxes)):
+                    ab.plot(fr, [bgv[f][1][j] for f in fr], lw=0.8, alpha=0.5,
+                            label=f"box {j + 1}")
+                ab.axvline(bf, color="crimson", lw=1.4)
+                ab.set_xlabel("Frame"); ab.set_ylabel("background (a.u.)")
+                ab.legend(fontsize=7); ab.grid(alpha=0.3)
+                ab.set_title("background per frame", fontsize=10)
+                st.pyplot(fb)
+            vals = np.array([bgv[f][0] for f in fr])
+            st.caption(f"Background drift over the recording: {vals.min():.1f} to {vals.max():.1f} "
+                       f"(spread {vals.max() - vals.min():.1f}). The regions should stay dark and "
+                       f"cell-free in every frame; step through with the controls above to check.")
+            frame_loop("bgchk" + sfx, bfi, bplay, bspd, len(frames))
+        except Exception as e:
+            st.warning(f"Could not build the background check: {e}")
 
     st.subheader("Activity heatmap (cells × frames)")
     fig2, ax2 = plt.subplots(figsize=(11, 5))
-    arr = np.nan_to_num(dff_df[cells].to_numpy(float)).T
+    arr = np.nan_to_num(df[cells].to_numpy(float)).T
     im = ax2.imshow(arr, aspect="auto", cmap="magma", vmin=0,
                     vmax=np.percentile(arr, 99) if arr.size else 1, interpolation="nearest")
     ax2.axvline(tfi, color="cyan", lw=1.5, alpha=0.9)                          # looping cursor
     ax2.set_xlabel("Frame"); ax2.set_ylabel("Cell")
-    fig2.colorbar(im, ax=ax2, label="ΔF/F0")
+    fig2.colorbar(im, ax=ax2, label="ΔF/F0i")
     st.pyplot(fig2)
-    frame_loop("trc", tfi, tplay, tspd, len(frames))
+    frame_loop("trc" + sfx, tfi, tplay, tspd, len(frames))
+
+
+with T[TAB_TRC]:
+    roi_split(render_traces, "trc")
 
 # ---------------------------------------------------------- Clustering
-with tabs[4]:
+def render_clustering(df, sfx):
     st.subheader("Trace clustering (PCA → K-means)")
-    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
+    cells = [c for c in df.columns if c.startswith("Cell_")]
     if len(cells) < 4:
         st.info("Need at least 4 cells to cluster.")
     else:
         cc1, cc2 = st.columns(2)
-        n_pca = cc1.slider("PCA features", 5, 30, 25)
-        k = cc2.slider("Number of clusters (k)", 2, 8, 4)
-        cl = cc.cluster_traces(dff_df, n_pca=n_pca, n_clusters=k)
+        _pca_max = int(max(5, min(200, len(cells) - 1, len(frames))))
+        n_pca = cc1.slider("PCA features", 2, _pca_max, min(25, _pca_max), key="npca" + sfx,
+                           help=f"Capped at {_pca_max} by the number of cells and frames.")
+        k = cc2.slider("Number of clusters (k)", 2, int(max(2, min(30, len(cells)))), 4,
+                       key="nclu" + sfx)
+        cl = cc.cluster_traces(df, n_pca=n_pca, n_clusters=k)
         ids, labels, coords = cl["ids"], cl["labels"], cl["coords"]
         st.caption(f"PCA kept {cl['n_pca_used']} components "
                    f"({cl['explained_var']*100:.0f}% variance) · {cl['k']} clusters.")
-        colors = (plt.get_cmap("tab10")(np.linspace(0, 1, 10)) * 255)[:, :3]
+        colors, cnames = cluster_palette(cl["k"])
 
         colL, colR = st.columns(2)
         # cluster map on tissue
         base_img = cc.stretch8(reg["reg_mem"][0], clahe=True)
         cmap_img = np.dstack([base_img] * 3).astype(float) * 0.35
         for cid, lab in zip(ids, labels):
-            cmap_img[mask0 == cid] = colors[lab % 10]
+            cmap_img[mask0 == cid] = colors[lab % len(colors)]
         with colL:
             st.image(np.clip(cmap_img, 0, 255).astype(np.uint8),
                      caption="Cells colored by cluster", width="stretch")
@@ -574,26 +826,27 @@ with tabs[4]:
             for lab in range(cl["k"]):
                 m = labels == lab
                 axp.scatter(coords[m, 0], coords[m, 1], s=14, alpha=0.7,
-                            color=colors[lab % 10] / 255, label=f"C{lab} (n={m.sum()})")
+                            color=colors[lab % len(colors)] / 255, label=f"C{lab} (n={m.sum()})")
             axp.set_xlabel("PC1"); axp.set_ylabel("PC2"); axp.legend(fontsize=8); axp.grid(alpha=0.3)
             st.pyplot(figp)
         # cluster-average traces
         figc, axc = plt.subplots(figsize=(11, 4))
-        A = np.nan_to_num(dff_df[cells].to_numpy(float)).T
+        A = np.nan_to_num(df[cells].to_numpy(float)).T
         idmap = {c: i for i, c in enumerate(ids)}
         for lab in range(cl["k"]):
             rows = [idmap[c] for c, l in zip(ids, labels) if l == lab]
             if rows:
-                axc.plot(dff_df["Frame"], A[rows].mean(0), lw=2, color=colors[lab % 10] / 255,
+                axc.plot(df["Frame"], A[rows].mean(0), lw=2, color=colors[lab % len(colors)] / 255,
                          label=f"Cluster {lab} (n={len(rows)})")
-        axc.set_xlabel("Frame"); axc.set_ylabel("mean ΔF/F0"); axc.legend(); axc.grid(alpha=0.3)
+        axc.set_xlabel("Frame"); axc.set_ylabel("mean ΔF/F0i"); axc.legend(); axc.grid(alpha=0.3)
         axc.set_title("Cluster-average traces")
         st.pyplot(figc)
 
         cluster_df = pd.DataFrame({"cell_id": ids, "cluster": labels})
-        ss["cluster_df"] = cluster_df          # made available to the Downloads tab
+        if sfx.endswith("_all"):
+            ss["cluster_df"] = cluster_df      # the all-cell run feeds the Downloads tab
         st.download_button("⬇ cluster assignments (CSV)", cluster_df.to_csv(index=False).encode(),
-                           "cluster_assignments.csv", "text/csv")
+                           "cluster_assignments.csv", "text/csv", key="dlclu" + sfx)
 
         # ---------- AI story from the clusters (Amazon Bedrock, open-source model) ----------
         st.divider()
@@ -601,8 +854,7 @@ with tabs[4]:
         import cafin_ai
         from scipy.signal import find_peaks as _fp
         from skimage.measure import regionprops as _rp
-        CNAMES = ["blue", "orange", "green", "red", "purple", "brown", "pink", "gray", "olive", "cyan"]
-        A2 = np.nan_to_num(dff_df[cells].to_numpy(float))          # frames x cells
+        A2 = np.nan_to_num(df[cells].to_numpy(float))              # frames x cells
         nfr = A2.shape[0]
         thirds = np.array_split(np.arange(nfr), 3)
         peakc = A2.max(0); meanc = A2.mean(0)
@@ -623,7 +875,7 @@ with tabs[4]:
                 sync = float("nan")
             cxy = [cent[c] for c in cids if c in cent]
             clist.append(dict(
-                cluster=lab, color=CNAMES[lab % 10], n_cells=int(len(sel)),
+                cluster=lab, color=cnames[lab], n_cells=int(len(sel)),
                 mean_peak_dff0=round(float(peakc[sel].mean()), 2),
                 mean_dff0=round(float(meanc[sel].mean()), 3),
                 active_fraction=round(float((peakc[sel] > peak_thr).mean()), 2),
@@ -652,7 +904,7 @@ with tabs[4]:
         for lab in range(cl["k"]):
             sel = np.where(labels == lab)[0]
             if len(sel):
-                cluster_series.append(dict(cluster=lab, color=CNAMES[lab % 10], n_cells=int(len(sel)),
+                cluster_series.append(dict(cluster=lab, color=cnames[lab], n_cells=int(len(sel)),
                                            mean_trace_dff0=_ds(A2[:, sel].mean(1))))
         full_payload = dict(dataset=os.path.basename(trial.rstrip("/\\")), method=R.get("mode"),
                             n_frames=int(nfr), n_cells=int(len(ids)), n_clusters=int(cl["k"]),
@@ -664,7 +916,7 @@ with tabs[4]:
 
         st.markdown("**Background / context** (sent to the model to ground its interpretation):")
         background = st.text_area(
-            "Describe the experiment", key="ai_background",
+            "Describe the experiment", key="ai_background" + sfx,
             placeholder="e.g. 3 dpf zebrafish larval fin; Latrunculin A 200 µM in 1% DMSO applied "
                         "immediately before imaging; GCaMP calcium indicator; confocal, ~1 frame/… s, "
                         "90 frames; membrane channel for segmentation…",
@@ -672,44 +924,100 @@ with tabs[4]:
 
         aci1, aci2 = st.columns([2, 1])
         ai_model = aci1.selectbox("Open-source model (Bedrock)", cafin_ai.MODEL_CHOICES, index=0,
+                                  key="aimodel" + sfx,
                                   help="Llama / Mixtral / DeepSeek via Bedrock Converse API. "
                                        "Needs AWS credentials + model access enabled.")
-        ai_region = aci2.text_input("AWS region", cafin_ai.DEFAULT_REGION)
+        ai_region = aci2.text_input("AWS region", cafin_ai.DEFAULT_REGION, key="airegion" + sfx)
         bcol0, bcol1, bcol2 = st.columns([1, 2, 2])
-        if bcol0.button("🔌 Test connection"):
-            ss["ai_conn"] = cafin_ai.check_credentials(ai_region)
-        if bcol1.button("✍  Story from clusters", type="primary"):
+        if bcol0.button("🔌 Test connection", key="aiconn" + sfx):
+            ss["ai_conn" + sfx] = cafin_ai.check_credentials(ai_region)
+        if bcol1.button("✍  Story from clusters", type="primary", key="aistory" + sfx):
             with st.spinner(f"Asking {ai_model}…"):
                 ok, text = cafin_ai.interpret_clusters(payload, model_id=ai_model, region=ai_region,
                                                        background=background)
-            ss["ai_story"] = text if ok else None
-            ss["ai_err"] = None if ok else text
-        if bcol2.button("🎞  Full temporal analysis (all frames)"):
+            ss["ai_story" + sfx] = text if ok else None
+            ss["ai_err" + sfx] = None if ok else text
+        if bcol2.button("🎞  Full temporal analysis (all frames)", key="aifull" + sfx):
             with st.spinner(f"Asking {ai_model} over the full time-series…"):
                 ok, text = cafin_ai.interpret_clusters(full_payload, model_id=ai_model, region=ai_region,
                                                        background=background, full=True, max_tokens=1600)
-            ss["ai_story_full"] = text if ok else None
-            ss["ai_err"] = None if ok else text
-        if ss.get("ai_conn"):
-            okc, msgc = ss["ai_conn"]
+            ss["ai_story_full" + sfx] = text if ok else None
+            ss["ai_err" + sfx] = None if ok else text
+        if ss.get("ai_conn" + sfx):
+            okc, msgc = ss["ai_conn" + sfx]
             (st.success if okc else st.error)(msgc)
-        if ss.get("ai_err"):
-            st.error(ss["ai_err"])
-        if ss.get("ai_story"):
+        if ss.get("ai_err" + sfx):
+            st.error(ss["ai_err" + sfx])
+        if ss.get("ai_story" + sfx):
             st.markdown("##### Findings — cluster snapshot")
-            st.markdown(ss["ai_story"])
-        if ss.get("ai_story_full"):
+            st.markdown(ss["ai_story" + sfx])
+        if ss.get("ai_story_full" + sfx):
             st.markdown("##### Findings — full time-course (all frames)")
-            st.markdown(ss["ai_story_full"])
-        if ss.get("ai_story") or ss.get("ai_story_full"):
+            st.markdown(ss["ai_story_full" + sfx])
+        if ss.get("ai_story" + sfx) or ss.get("ai_story_full" + sfx):
             st.caption(f"Generated by {ai_model} (open-source) via Amazon Bedrock. Treat as "
                        "hypotheses, not conclusions.")
+        # ---------- follow-up questions, with conversation memory ----------
+        st.divider()
+        st.markdown("##### 💬 Ask about these clusters")
+        chat_key = "ai_chat" + sfx
+        if chat_key not in ss:
+            ss[chat_key] = []
+        SUGGEST = [
+            ("Initiators / followers",
+             "Identify initiators and followers from the calcium traces after the PCA "
+             "clustering. Which cluster is the initiator, and which follow it? Cite the "
+             "timing numbers you used."),
+            ("Most synchronized",
+             "Which clusters are the most and least synchronized, and what could explain "
+             "that difference?"),
+            ("Wave propagation",
+             "Is there evidence of a wave propagating between clusters? Use the cluster "
+             "positions and their activity timing."),
+            ("What next?",
+             "What experiment or analysis would best test the leading hypothesis from "
+             "these clusters?"),
+        ]
+        _cols = st.columns(len(SUGGEST))
+        asked = None
+        for _i, (_lbl, _q) in enumerate(SUGGEST):
+            if _cols[_i].button(_lbl, key=f"sug{_i}{sfx}", help=_q, width="stretch"):
+                asked = _q
+
+        for _m in ss[chat_key]:
+            with st.chat_message(_m["role"]):
+                st.markdown(_m["text"])
+
+        with st.form(key="chatform" + sfx, clear_on_submit=True):
+            _typed = st.text_input("Your question", placeholder=
+                                   "e.g. Which cluster is the initiator, and why?",
+                                   label_visibility="collapsed")
+            _sent = st.form_submit_button("Ask")
+        _question = asked or (_typed if _sent and _typed.strip() else None)
+        if _question:
+            _hist = list(ss[chat_key])
+            ss[chat_key].append({"role": "user", "text": _question})
+            with st.spinner(f"Asking {ai_model}…"):
+                _ok, _ans = cafin_ai.chat(full_payload, _hist, _question, model_id=ai_model,
+                                          region=ai_region, background=background)
+            ss[chat_key].append({"role": "assistant",
+                                 "text": _ans if _ok else f"⚠️ {_ans}"})
+            st.rerun()
+        if ss[chat_key] and st.button("Clear conversation", key="clrchat" + sfx):
+            ss[chat_key] = []
+            st.rerun()
+
         with st.expander("data sent to the model"):
             st.write("Cluster snapshot payload:"); st.json(payload)
             st.write("Full time-series payload:"); st.json(full_payload)
 
+
+with T[TAB_CLU]:
+    roi_split(render_clustering, "clu")
+
 # ---------------------------------------------------------- Tracking
-with tabs[5]:
+if TAB_TRK in T:
+  with T[TAB_TRK]:
     if R["handling"] == "tracking":
         link = R.get("link")
         if link and R.get("tstats"):
@@ -763,29 +1071,65 @@ with tabs[5]:
         st.info("Pick **Cell tracking** in the sidebar to follow cells across frames.")
 
 # ---------------------------------------------------------- Statistics
-with tabs[6]:
-    st.subheader("Tissue-level metrics")
-    st.dataframe(pd.DataFrame([stats]).T.rename(columns={0: "value"}), width="stretch")
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-    for ax, key, title in zip(axes, ["amps", "intervals", "areas"],
-                              ["Peak amplitude (ΔF/F0)", "Inter-peak interval (frames)", "Peak area"]):
-        data = np.asarray(dist[key], float)
-        if data.size:
-            ax.violinplot(data, showmeans=True)
-            ax.scatter(np.random.normal(1, 0.04, data.size), data, s=8, alpha=0.4, color="steelblue")
-        ax.set_title(title); ax.set_xticks([])
+def render_stats(df, sfx):
+    st_, dist_ = cc.metrics(df, threshold=peak_thr)
+
+    # ---------- per-cell peak dynamics, one point per cell ----------
+    st.subheader("Peak dynamics")
+    fi = st.number_input("Frame interval (minutes per frame; leave at 1 to report in frames)",
+                         0.001, 60.0, 1.0, step=0.1, key="fint" + sfx)
+    feats = cc.peak_features(df, threshold=peak_thr, frame_interval=fi)
+    unit = "min" if abs(fi - 1.0) > 1e-9 else "frames"
+    panels = [("n_peaks", "# peaks", ""),
+              ("t_first_peak", "1$^{st}$ peak", unit),
+              ("auc", "A.U.C.", ""),
+              ("amplitude", "Amplitude ($\\Delta$F/F$_0$)", ""),
+              ("fwhm", "F.W.H.M.", unit),
+              ("dt_peak", "$\\Delta t_{peak}$", unit)]
+    rng = np.random.default_rng(0)
+    fig, axes = plt.subplots(1, 6, figsize=(15, 3.8))
+    for ax, (col, title, un) in zip(axes, panels):
+        vals = feats[col].to_numpy(float)
+        vals = vals[~np.isnan(vals)]
+        if vals.size:
+            ax.boxplot(vals, widths=0.55, showfliers=False,
+                       boxprops=dict(color="0.35"), medianprops=dict(color="0.35"),
+                       whiskerprops=dict(color="0.35"), capprops=dict(color="0.35"))
+            ax.scatter(rng.normal(1, 0.055, vals.size), vals, s=16, alpha=0.4,
+                       color="0.45", edgecolors="none", zorder=3)
+        ax.set_ylabel(f"{title} ({un})" if un else title, fontsize=10)
+        ax.set_xticks([])
+        ax.yaxis.grid(True, ls="--", alpha=0.55)
+        ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    n_ok = int(feats["n_peaks"].gt(0).sum())
+    fig.suptitle(f"{len(feats)} cells  ({n_ok} with at least one detected peak, "
+                 f"threshold {peak_thr} ΔF/F0i)", fontsize=10)
+    fig.tight_layout()
     st.pyplot(fig)
+    st.download_button("⬇ per-cell peak features (CSV)", feats.to_csv(index=False).encode(),
+                       "peak_features.csv", "text/csv", key="dlfeat" + sfx)
+    st.caption("Box = median and quartiles, whiskers = 1.5 IQR, one grey point per cell. "
+               "Cells with no detected peak are excluded from the peak-shape panels.")
+
+    st.subheader("Tissue-level metrics")
+    st.dataframe(pd.DataFrame([st_]).T.rename(columns={0: "value"}), width="stretch")
 
     st.subheader("Fraction of cells above threshold, per frame")
-    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
-    frac = (dff_df[cells].to_numpy(float) > peak_thr).mean(axis=1)
+    cells = [c for c in df.columns if c.startswith("Cell_")]
+    frac = (df[cells].to_numpy(float) > peak_thr).mean(axis=1)
     fig3, ax3 = plt.subplots(figsize=(11, 3.5))
-    ax3.plot(dff_df["Frame"], frac, "-o", ms=3)
+    ax3.plot(df["Frame"], frac, "-o", ms=3)
     ax3.set_ylim(0, 1); ax3.set_xlabel("Frame"); ax3.set_ylabel("fraction active"); ax3.grid(alpha=0.3)
     st.pyplot(fig3)
 
+
+with T[TAB_STA]:
+    roi_split(render_stats, "sta")
+
 # ---------------------------------------------------------- Downloads
-with tabs[7]:
+with T[TAB_DL]:
     # ------------------------------------------------ save straight to a folder
     st.subheader("Save results to a folder")
     if "save_dir" not in ss:
@@ -803,13 +1147,13 @@ with tabs[7]:
     # what can be saved from the current results
     _avail = {
         "Raw traces (all_cells_raw.csv)": ("all_cells_raw.csv", "csv", raw_df),
-        "ΔF/F0 traces (cells_normalized.csv)": ("cells_normalized.csv", "csv", dff_df),
+        "ΔF/F0i traces (cells_normalized.csv)": ("cells_normalized.csv", "csv", dff_df),
         "Metrics (metrics.csv)": ("metrics.csv", "csv", pd.DataFrame([stats])),
         "Segmentation mask (mask_0.tiff)": ("mask_0.tiff", "tiff", mask0),
     }
     if roi_ids:
         _keep = ["Frame"] + [f"Cell_{i}" for i in roi_ids if f"Cell_{i}" in dff_all.columns]
-        _avail["ROI-only ΔF/F0 (roi_cells_normalized.csv)"] = ("roi_cells_normalized.csv", "csv",
+        _avail["ROI-only ΔF/F0i (roi_cells_normalized.csv)"] = ("roi_cells_normalized.csv", "csv",
                                                                dff_all[_keep])
     if ss.get("cluster_df") is not None:
         _avail["Cluster assignments (cluster_assignments.csv)"] = ("cluster_assignments.csv", "csv",
@@ -856,11 +1200,11 @@ with tabs[7]:
     st.subheader("Or download individually")
     st.download_button("⬇ raw traces (CSV)", raw_df.to_csv(index=False).encode(),
                        "all_cells_raw.csv", "text/csv")
-    st.download_button("⬇ ΔF/F0 traces — current cell set (CSV)", dff_df.to_csv(index=False).encode(),
+    st.download_button("⬇ ΔF/F0i traces — current cell set (CSV)", dff_df.to_csv(index=False).encode(),
                        "cells_normalized.csv", "text/csv")
     if roi_ids:
         keep = ["Frame"] + [f"Cell_{i}" for i in roi_ids if f"Cell_{i}" in dff_all.columns]
-        st.download_button("⬇ ROI-only ΔF/F0 (CSV)", dff_all[keep].to_csv(index=False).encode(),
+        st.download_button("⬇ ROI-only ΔF/F0i (CSV)", dff_all[keep].to_csv(index=False).encode(),
                            "roi_cells_normalized.csv", "text/csv")
     st.download_button("⬇ metrics (CSV)", pd.DataFrame([stats]).to_csv(index=False).encode(),
                        "metrics.csv", "text/csv")

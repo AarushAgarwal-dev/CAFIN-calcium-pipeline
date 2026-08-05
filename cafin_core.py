@@ -479,6 +479,18 @@ def _rm_outliers(a):
     return a[(a >= q1 - 1.5 * iqr) & (a <= q3 + 1.5 * iqr)]
 
 
+def background_values(stack, boxes):
+    """Per-frame background estimate, exactly as bg_subtract computes it:
+    1.5xIQR outlier removal in each box, median per box, then the mean of the boxes.
+    Returns {frame: (mean_bg, [per_box_medians])} so the regions can be checked."""
+    out = {}
+    for i, img in stack.items():
+        vals = [float(np.median(_rm_outliers(img[y1:y2, x1:x2].flatten())))
+                for (x1, y1, x2, y2) in boxes]
+        out[i] = (float(np.mean(vals)), vals)
+    return out
+
+
 def bg_subtract(stack, boxes):
     out = {}
     for i, img in stack.items():
@@ -556,23 +568,96 @@ def extract_tracked_traces(mask_per_frame, ca_by_frame, frames, bg=False):
     return df
 
 
-def compute_dff0(raw_df, method="lowest", floor=1.0, n_base=10):
+def f0_per_cell(raw_df, method="percell", floor=1.0, n_base=10):
+    """Baseline fluorescence for every cell: {cell: (F0i, [row indices used])}.
+
+    method
+      "percell"  F0i = mean of that cell's OWN n_base lowest frames  (default)
+      "min"      F0i = that cell's single lowest value
+      "lowest"   one shared set of frames, picked from the population mean (legacy)
+      "first"    the first n_base frames (a true pre-stimulus F0, if the recording
+                 starts before the stimulus)
+      "last"     the last n_base frames
+
+    The per-cell methods give each cell its own baseline frames, so a cell that is
+    quiet early and a cell that is quiet late are each normalised to their own resting
+    level rather than to a window chosen from the population average.
+    """
     cells = [c for c in raw_df.columns if c.startswith("Cell_")]
     n = raw_df.shape[0]
-    favg = raw_df[cells].mean(axis=1).values
-    nb = min(n_base, max(3, n // 3))
+    nb = int(min(n_base, max(3, n // 3)))
+    shared = None
     if method == "lowest":
-        base = sorted(sorted(range(n), key=lambda f: favg[f])[:nb])
+        favg = raw_df[cells].mean(axis=1).values
+        shared = sorted(sorted(range(n), key=lambda f: favg[f])[:nb])
     elif method == "first":
-        base = list(range(min(nb, n)))
-    else:
-        base = list(range(max(0, n - nb), n))
-    dff = raw_df.copy()
+        shared = list(range(min(nb, n)))
+    elif method == "last":
+        shared = list(range(max(0, n - nb), n))
+
+    out = {}
     for c in cells:
-        v = raw_df[c].values.astype(float)
-        f0 = max(np.nanmean(v[base]), floor)
-        dff[c] = (v - f0) / f0
-    return dff, base
+        v = raw_df[c].to_numpy(float)
+        if shared is not None:
+            rows = shared
+        elif method == "min":
+            rows = [int(np.nanargmin(v))]
+        else:                                   # "percell": this cell's own lowest frames
+            rows = sorted(int(i) for i in np.argsort(np.nan_to_num(v, nan=np.inf))[:nb])
+        out[c] = (max(float(np.nanmean(v[rows])), floor), rows)
+    return out
+
+
+def compute_dff0(raw_df, method="percell", floor=1.0, n_base=10, return_f0=False):
+    """Normalise each cell by its OWN baseline: ΔF/F0i = (F − F0i) / F0i.
+
+    See f0_per_cell for the baseline methods. Returns (dff, base), where `base` is the
+    shared baseline rows or None when every cell uses its own. With return_f0=True the
+    per-cell {cell: (F0i, rows)} mapping is returned as a third element.
+    """
+    f0i = f0_per_cell(raw_df, method=method, floor=floor, n_base=n_base)
+    dff = raw_df.copy()
+    for c, (f0, _rows) in f0i.items():
+        dff[c] = (raw_df[c].to_numpy(float) - f0) / f0
+    shared = None
+    if method in ("lowest", "first", "last") and f0i:
+        shared = next(iter(f0i.values()))[1]
+    return (dff, shared, f0i) if return_f0 else (dff, shared)
+
+
+# ============================================================ PEAK FEATURES
+def peak_features(dff_df, threshold=0.5, frame_interval=1.0, min_distance=2):
+    """Per-cell peak-shape metrics, one row per cell.
+
+    Columns
+      n_peaks       number of detected transients
+      t_first_peak  time of the first peak
+      auc           area under the ΔF/F0 curve (clipped at 0)
+      amplitude     mean ΔF/F0 at the detected peaks
+      fwhm          mean full width at half maximum of the peaks
+      dt_peak       mean interval between consecutive peaks
+
+    `frame_interval` converts frames to real time (e.g. minutes per frame); leave at
+    1.0 to report everything in frames. Cells with no detected peak get NaN for the
+    peak-dependent columns, so they drop out of those panels instead of biasing them.
+    """
+    from scipy.signal import peak_widths
+    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
+    rows = []
+    for c in cells:
+        v = np.nan_to_num(dff_df[c].to_numpy(float))
+        pk, _ = find_peaks(v, height=threshold, distance=min_distance)
+        if len(pk):
+            amp = float(np.mean(v[pk]))
+            t1 = float(pk[0] * frame_interval)
+            fw = float(np.mean(peak_widths(v, pk, rel_height=0.5)[0]) * frame_interval)
+            dt = float(np.mean(np.diff(pk)) * frame_interval) if len(pk) > 1 else np.nan
+        else:
+            amp = t1 = fw = dt = np.nan
+        rows.append(dict(cell=int(c.split("_")[1]), n_peaks=int(len(pk)), t_first_peak=t1,
+                         auc=float(np.trapezoid(np.clip(v, 0, None)) * frame_interval),
+                         amplitude=amp, fwhm=fw, dt_peak=dt))
+    return pd.DataFrame(rows)
 
 
 # ============================================================ CLUSTERING
