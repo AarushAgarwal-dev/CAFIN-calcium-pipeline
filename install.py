@@ -72,8 +72,6 @@ def main():
     ap.add_argument("--cpu", action="store_true", help="skip GPU-specific PyTorch builds")
     ap.add_argument("--with-ai", action="store_true", help="install optional Amazon Bedrock support")
     ap.add_argument("--with-paper", action="store_true", help="install paper-generation packages")
-    ap.add_argument("--without-cellpose", action="store_true",
-                    help="install mask-based CAFIN without Cellpose or PyTorch")
     ap.add_argument("--no-venv", action="store_true",
                     help="advanced: install into the current Python environment")
     # Old documented flag remains accepted; isolation is now already the default.
@@ -99,23 +97,10 @@ def main():
 
     try:
         run([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
+        vendor = "none" if args.cpu else gpu_vendor()
+        print(f"  Detected GPU vendor: {vendor}")
+        install_torch(python, vendor, args.cpu)
         run([python, "-m", "pip", "install", "-r", REQ_GUI])
-        if not args.without_cellpose:
-            vendor = "none" if args.cpu else gpu_vendor()
-            print(f"  Detected GPU vendor: {vendor}")
-            torch_ok = True
-            try:
-                install_torch(python, vendor, args.cpu)
-            except RuntimeError as torch_exc:
-                torch_ok = False
-                print(f"\nPyTorch could not be installed ({torch_exc}).")
-            if (not torch_ok or
-                    run([python, "-m", "pip", "install", "-r", "requirements-cellpose.txt"],
-                        required=False) != 0):
-                print("\nCellpose could not be installed. CAFIN will still run with an existing "
-                      "segmented mask. See TROUBLESHOOTING.md.")
-        else:
-            print("  Cellpose skipped. Use 'Load existing mask' in the GUI.")
         if args.with_ai:
             run([python, "-m", "pip", "install", "-r", "requirements-ai.txt"])
         if args.with_paper:

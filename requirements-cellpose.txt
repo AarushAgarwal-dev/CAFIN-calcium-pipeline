@@ -1,2 +1,0 @@
-# Optional segmentation model. CAFIN can instead use an existing labelled mask.
-cellpose>=3.1,<5
