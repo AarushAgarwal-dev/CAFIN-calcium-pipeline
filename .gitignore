@@ -9,6 +9,8 @@ venv/
 # The processed per-cell CSVs ARE tracked so the analysis can be re-run.
 *.tif
 *.tiff
+!demo_data/**/*.tif
+!demo_data/**/*.tiff
 *.nd2
 *.mat
 *.gif

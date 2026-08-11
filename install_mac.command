@@ -2,7 +2,9 @@
 # CAFIN installer for macOS and Linux. Double-click on macOS, or run: bash install_mac.command
 cd "$(dirname "$0")" || exit 1
 
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3.11 >/dev/null 2>&1; then
+    PY=python3.11
+elif command -v python3 >/dev/null 2>&1; then
     PY=python3
 elif command -v python >/dev/null 2>&1; then
     PY=python
@@ -14,13 +16,13 @@ else
     exit 1
 fi
 
-echo "Installing CAFIN. This can take several minutes."
-"$PY" install.py "$@"
+echo "Installing CAFIN in its own environment. This can take several minutes."
+"$PY" install.py --launch "$@"
 status=$?
 
 echo
 if [ $status -eq 0 ]; then
-    echo "Installation finished. Start the app with:  ./run_gui.command"
+    echo "Installation finished. The app should now be open in your browser."
 else
     echo "The installation did not finish. Scroll up to see the error."
 fi

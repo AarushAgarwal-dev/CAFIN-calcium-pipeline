@@ -4,7 +4,12 @@ cd /d "%~dp0"
 
 where py >nul 2>&1
 if %errorlevel%==0 (
-    set "PY=py -3"
+    py -3.11 -V >nul 2>&1
+    if %errorlevel%==0 (
+        set "PY=py -3.11"
+    ) else (
+        set "PY=py -3"
+    )
 ) else (
     where python >nul 2>&1
     if %errorlevel%==0 (
@@ -17,13 +22,13 @@ if %errorlevel%==0 (
     )
 )
 
-echo Installing CAFIN. This can take several minutes.
-%PY% install.py %*
+echo Installing CAFIN in its own environment. This can take several minutes.
+%PY% install.py --launch %*
 if errorlevel 1 (
     echo.
     echo The installation did not finish. Scroll up to see the error.
 ) else (
     echo.
-    echo Installation finished. Start the app with run_gui.bat
+    echo Installation finished. The app should now be open in your browser.
 )
 pause

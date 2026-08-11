@@ -1,4 +1,4 @@
-# CAFIN — 100% Reproducible Reproduction of the Calcium-Transient Study
+# CAFIN processed-data reproduction of the calcium-transient study
 
 This folder reproduces the manuscript *"Quantitatively Rapid Analysis of Calcium
 Transients in Epithelial Cell Layer in Vivo upon Cytoskeleton Disruption"* end-to-end,
@@ -11,7 +11,7 @@ per-cell ΔF/F₀ CSVs the pipeline produced for two independent trials
 
 ---
 
-## TL;DR — reproduce everything in one command
+## Rebuild the analysis, figures, and paper in one command
 
 ```bash
 cd CAFIN_Cleanedup_Code_Aarush/REPRODUCE
@@ -20,9 +20,14 @@ pip install -r requirements.txt          # first time only
 python run_all.py                         # does all three steps below
 ```
 
-`run_all.py` runs the end-to-end recompute the **first** time (regenerating ΔF/F₀ from
-the raw LATA1 images), then the analysis, figures and paper. It skips the slow recompute
-on later runs (delete `regenerated/` or pass `--recompute` to force it).
+`run_all.py` uses the processed per-cell data included in GitHub to rebuild the analysis, figures,
+and paper. The checked-in `regenerated/` provenance is retained. It does not claim to recreate the
+microscopy acquisition or unavailable raw images.
+
+Passing `--recompute` additionally regenerates LATA1 traces from raw TIFFs. This requires the
+original `LATA1TRAIL/BEFOREDRUG/{membrane,ca2}` and `AFTERDRUG/{membrane,ca2}` folders, which are
+too large to distribute through GitHub. The command now stops safely before deleting anything when
+those folders are absent.
 
 Or run the steps individually:
 

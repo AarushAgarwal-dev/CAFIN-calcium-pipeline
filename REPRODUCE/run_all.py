@@ -20,6 +20,12 @@ except Exception:
 
 force = "--recompute" in sys.argv
 regen = os.path.join(HERE, "regenerated")
+raw_ready = all(os.path.isdir(os.path.join(os.path.dirname(HERE), "LATA1TRAIL", cond, channel))
+                for cond in ("BEFOREDRUG", "AFTERDRUG") for channel in ("membrane", "ca2"))
+if force and not raw_ready:
+    raise SystemExit("--recompute requires raw LATA1 TIFF folders, which are not distributed "
+                     "on GitHub. Remove --recompute to rebuild the analysis and paper from the "
+                     "included processed data.")
 if force and os.path.isdir(regen):
     shutil.rmtree(regen, ignore_errors=True)
 

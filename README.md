@@ -9,8 +9,8 @@ cell tracking, trace clustering, and optional AI interpretation.
 
 ## Quick start
 
-One line. It downloads the code, installs everything (including the right PyTorch for your
-graphics card), and opens the app in your browser.
+One line downloads the code, creates an isolated `.venv`, installs the GUI, creates a synthetic
+demo recording, checks the installation, and opens the app. Python 3.11 is recommended.
 
 **macOS or Linux:**
 
@@ -24,8 +24,9 @@ git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git && cd 
 git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git; cd CAFIN-calcium-pipeline; python install.py --launch
 ```
 
-You need Python 3.9 or newer and git. Already have the folder? Just run `python install.py --launch`
-inside it. Next time, start the app with `streamlit run cafin_gui.py`, or double-click
+You need 64-bit Python 3.10 to 3.12 and git. Python 3.11 has the broadest compatibility with the
+scientific and GPU packages. Already have the folder? Run `python install.py --launch`. Next time,
+double-click
 `run_gui.bat` on Windows or `run_gui.command` on macOS.
 
 ## How it works
@@ -60,12 +61,13 @@ The pipeline runs in eight steps.
 If you would rather not use a terminal, double-click `install_windows.bat` on Windows or
 `install_mac.command` on macOS. Both call the same installer.
 
-`install.py` takes a few flags: `--launch` opens the GUI when it finishes, `--venv` installs into a
-local `.venv` instead of your main Python, and `--cpu` skips GPU detection.
+`install.py` creates a local `.venv` by default, so it does not alter your normal Python packages.
+Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--with-ai` for Amazon Bedrock, or
+`--with-paper` for manuscript generation. `--no-venv` is available for advanced users.
 
-To install by hand instead, use `pip install -r REPRODUCE/requirements.txt`. The core packages are
-numpy, pandas, scipy, matplotlib, scikit-image, opencv-python, tifffile, cellpose, and torch. The
-GUI also needs streamlit, plotly, scikit-learn, itk-elastix, pillow, and boto3.
+To install the GUI by hand, use `pip install -r requirements-gui.txt`. Optional dependencies are in
+`requirements-ai.txt` and `requirements-paper.txt`. The processed-data paper workflow has its own
+smaller `REPRODUCE/requirements.txt`.
 
 ### Graphics card support
 
@@ -95,8 +97,10 @@ a Windows machine works through DirectML.
 streamlit run cafin_gui.py
 ```
 
-Set the trial folder in the sidebar. It needs `membrane/` and `ca2/` subfolders of numbered `.tif`
-frames. Pick a method and click Run analysis.
+The first launch opens a small synthetic demo, clearly labelled as non-biological. For your data,
+choose a trial folder containing `membrane/` and `ca2/` subfolders. Both channels need the same
+number of numbered `.tif` frames. Pick a method and click Run analysis. Run `python preflight.py
+--data /path/to/trial` for a standalone input check.
 
 The three methods are:
 
@@ -114,10 +118,14 @@ cd REPRODUCE
 python run_all.py
 ```
 
-This regenerates ΔF/F0 from the raw TIFFs, runs the analysis and statistics, builds the figures, and
-assembles the draft manuscript (`.docx`) and `PROOF.md`. Results are written to `REPRODUCE/results/`.
+This rebuilds the analysis, statistics, figures, draft manuscript (`.docx`), and `PROOF.md` from the
+processed per-cell data distributed in the repository. Results are written to `REPRODUCE/results/`.
 A fixed random seed makes re-runs identical. More detail is in
 [`REPRODUCE/README_REPRODUCE.md`](REPRODUCE/README_REPRODUCE.md).
+
+`python run_all.py --recompute` additionally starts from original raw LATA1 TIFFs. Those large
+microscopy files are not distributed on GitHub, so this mode requires the user to supply them in
+the documented folder layout.
 
 ### AI interpretation (optional)
 
@@ -141,6 +149,9 @@ cafin_track.py       cell tracking: per-frame segmentation linked by Hungarian m
 cafin_pipeline.py    scripted end-to-end pipeline (no GUI)
 cafin_gui.py         Streamlit application
 cafin_ai.py          Amazon Bedrock (open-source models) narration of clustering results
+demo_data.py         creates the synthetic first-run example
+preflight.py         checks packages, GPU fallback, and trial-folder structure
+requirements-*.txt  GUI plus optional AI and paper dependency groups
 REPRODUCE/           scripts, results, figures, and the generated paper
   run_all.py             recompute, analyse, build figures, build paper
   reproduce.py           metrics, statistics, quantitative figures
@@ -153,7 +164,8 @@ LATA1TRAIL/, LATA2TRIAL/  per-trial processed data (before and after drug)
 ```
 
 Raw microscopy stacks (`.tif`, `.nd2`) and other large binaries are not tracked. Only the processed
-per-cell CSVs needed to re-run the analysis are included.
+per-cell CSVs needed to re-run the analysis are included. The tiny TIFF stack under `demo_data/` is
+synthetic and is tracked only so a new user can exercise the GUI immediately.
 
 ## Data
 
@@ -168,6 +180,8 @@ To run from raw images, a trial folder needs `membrane/` and `ca2/` subfolders o
 frames, for example `..._0000.tif`, `..._0001.tif`, and so on.
 
 ## Notes
+
+If installation or a dataset fails validation, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 Per-frame Cellpose segmentation, used by the tracking method, is slow on CPU, roughly 30 to 60
 seconds per frame. Use the frame-step control to subsample, or run a CUDA build of torch. The

@@ -13,7 +13,7 @@ Registration / analysis methods (choose one):
 Extras: data preview, interactive ROI selection (before or after a run), frame navigation
 with auto-loop, PCA + K-means trace clustering, and optional AI interpretation via Bedrock.
 """
-import os, glob, re, time
+import os, glob, re, time, sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -230,13 +230,23 @@ def detect_base(folder):
 # =========================================================== SIDEBAR
 st.sidebar.title("CAFIN pipeline")
 st.sidebar.caption("Motion correction → segmentation → ΔF/F0i → statistics")
+if sys.version_info >= (3, 13):
+    st.sidebar.warning("Python 3.13 is not tested with every Cellpose/GPU build. "
+                       "Python 3.11 is recommended; CPU analysis remains available.")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DEMO_DIR = os.path.join(APP_DIR, "demo_data")
+if not os.path.exists(os.path.join(DEMO_DIR, "membrane", "demo_mem_0000.tif")):
+    try:
+        from demo_data import make_demo
+        make_demo()
+    except Exception:
+        pass
 if "trial_path" not in ss:
-    ss["trial_path"] = os.path.join(APP_DIR, "lat_trial1_afterdrug")
+    ss["trial_path"] = DEMO_DIR
 
 st.sidebar.markdown("### Data folder")
-_b1, _b2 = st.sidebar.columns(2)
+_b1, _b2, _b3 = st.sidebar.columns(3)
 if _b1.button("📂 Browse…", width="stretch", help="Open a folder picker on this machine"):
     _p = pick_folder(ss["trial_path"], "Select the trial folder (with membrane/ and ca2/)")
     if _p:
@@ -247,6 +257,9 @@ if _b2.button("🔍 Find trials", width="stretch", help="Scan for folders contai
     ss["found_trials"] = found
     if not found:
         st.sidebar.warning("No folders with membrane/ and ca2/ found nearby.")
+if _b3.button("🧪 Demo", width="stretch", help="Load the included synthetic demonstration recording"):
+    ss["trial_path"] = DEMO_DIR
+    st.rerun()
 
 if ss.get("found_trials"):
     _opts = ["(choose a detected folder)"] + ss["found_trials"]
@@ -267,9 +280,24 @@ ok_data = os.path.isdir(memf) and os.path.isdir(caf)
 if ok_data:
     mem_base, ca_base = detect_base(memf), detect_base(caf)
     n_frames = cc.count_frames(memf, mem_base)
-    st.sidebar.success(f"membrane base: {mem_base}\n\ncalcium base: {ca_base}\n\nframes: {n_frames}")
+    n_ca = cc.count_frames(caf, ca_base)
+    if not mem_base or not ca_base:
+        ok_data = False
+        st.sidebar.error("No valid TIFF sequence found. Filenames must end in four digits, "
+                         "for example sample_0000.tif.")
+    elif n_frames != n_ca:
+        ok_data = False
+        st.sidebar.error(f"Channel frame counts do not match: membrane={n_frames}, calcium={n_ca}.")
+    elif n_frames == 0:
+        ok_data = False
+        st.sidebar.error("The channel folders contain no readable .tif frames.")
+    else:
+        st.sidebar.success(f"membrane base: {mem_base}\n\ncalcium base: {ca_base}"
+                           f"\n\nmatched frames: {n_frames}")
+        if os.path.abspath(trial) == os.path.abspath(DEMO_DIR):
+            st.sidebar.info("Synthetic demo data. Use it to learn the GUI only, not as evidence.")
 else:
-    st.sidebar.error("membrane/ and ca2/ subfolders not found in that path.")
+    st.sidebar.error("Choose a trial folder containing membrane/ and ca2/ subfolders, or click Demo.")
 
 mem_base = st.sidebar.text_input("Membrane base name", mem_base)
 ca_base = st.sidebar.text_input("Calcium base name", ca_base)
