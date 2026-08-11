@@ -624,6 +624,18 @@ with T[TAB_ROI]:
 def render_traces(df, sfx):
     cells = [c for c in df.columns if c.startswith("Cell_")]
     st.subheader(f"Traces before and after normalization ({len(cells)} cells)")
+    trace_layers = st.multiselect(
+        "Choose what to show in trace plots",
+        ["Individual cells", "Population mean", "Current-frame marker", "Baseline window"],
+        default=["Individual cells", "Population mean", "Current-frame marker", "Baseline window"],
+        key="trace_layers" + sfx,
+        help="These controls change only the display, not the analysis or saved data.")
+    shown_cells = st.multiselect(
+        "Individual cells to display",
+        cells, default=cells[:min(50, len(cells))], key="trace_cells" + sfx,
+        help="Limit overplotting while retaining every cell in population summaries and metrics.")
+    show_heatmap = st.checkbox("Show cell-by-frame activity heatmap", True,
+                               key="trace_heatmap" + sfx)
     tfi, tplay, tspd = frame_controls("trc" + sfx, len(frames))
     tf = frames[tfi]
 
@@ -644,28 +656,36 @@ def render_traces(df, sfx):
     p1, p2 = st.columns(2)
     with p1:
         fig0, ax0 = plt.subplots(figsize=(6, 3.6))
-        for cn in raw_cols:
-            ax0.plot(raw_sub["Frame"], raw_sub[cn], lw=0.4, alpha=0.22, color="dimgray")
-        ax0.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=2, color="black",
-                 label="population mean")
-        for r in base_rows:                       # baseline rows used for F_ref
-            if r < len(frames):
-                ax0.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
-        ax0.axvline(tf, color="crimson", lw=1.4, alpha=0.85)
+        if "Individual cells" in trace_layers:
+            for cn in [c for c in shown_cells if c in raw_cols]:
+                ax0.plot(raw_sub["Frame"], raw_sub[cn], lw=0.65, alpha=0.35)
+        if "Population mean" in trace_layers:
+            ax0.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=2, color="black",
+                     label="population mean")
+        if "Baseline window" in trace_layers:
+            for r in base_rows:
+                if r < len(frames):
+                    ax0.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
+        if "Current-frame marker" in trace_layers:
+            ax0.axvline(tf, color="crimson", lw=1.4, alpha=0.85)
         ax0.set_xlabel("Frame"); ax0.set_ylabel("raw intensity (a.u.)")
         ax0.set_title("BEFORE normalization (raw)", fontsize=10)
         ax0.legend(fontsize=7); ax0.grid(alpha=0.3)
         st.pyplot(fig0)
     with p2:
         fig, ax = plt.subplots(figsize=(6, 3.6))
-        for cn in cells:
-            ax.plot(df["Frame"], df[cn], lw=0.4, alpha=0.22, color="steelblue")
-        ax.plot(df["Frame"], df[cells].mean(axis=1), lw=2, color="crimson",
-                label="population mean")
-        for r in base_rows:
-            if r < len(frames):
-                ax.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
-        ax.axvline(tf, color="black", lw=1.4, alpha=0.85)
+        if "Individual cells" in trace_layers:
+            for cn in shown_cells:
+                ax.plot(df["Frame"], df[cn], lw=0.65, alpha=0.35)
+        if "Population mean" in trace_layers:
+            ax.plot(df["Frame"], df[cells].mean(axis=1), lw=2, color="crimson",
+                    label="population mean")
+        if "Baseline window" in trace_layers:
+            for r in base_rows:
+                if r < len(frames):
+                    ax.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
+        if "Current-frame marker" in trace_layers:
+            ax.axvline(tf, color="black", lw=1.4, alpha=0.85)
         ax.set_xlabel("Frame"); ax.set_ylabel("ΔF/F0i")
         ax.set_title("AFTER normalization (ΔF/F0i)", fontsize=10)
         ax.legend(fontsize=7); ax.grid(alpha=0.3)
@@ -777,15 +797,17 @@ def render_traces(df, sfx):
         except Exception as e:
             st.warning(f"Could not build the background check: {e}")
 
-    st.subheader("Activity heatmap (cells × frames)")
-    fig2, ax2 = plt.subplots(figsize=(11, 5))
-    arr = np.nan_to_num(df[cells].to_numpy(float)).T
-    im = ax2.imshow(arr, aspect="auto", cmap="magma", vmin=0,
-                    vmax=np.percentile(arr, 99) if arr.size else 1, interpolation="nearest")
-    ax2.axvline(tfi, color="cyan", lw=1.5, alpha=0.9)                          # looping cursor
-    ax2.set_xlabel("Frame"); ax2.set_ylabel("Cell")
-    fig2.colorbar(im, ax=ax2, label="ΔF/F0i")
-    st.pyplot(fig2)
+    if show_heatmap:
+        st.subheader("Activity heatmap (cells × frames)")
+        fig2, ax2 = plt.subplots(figsize=(11, 5))
+        arr = np.nan_to_num(df[cells].to_numpy(float)).T
+        im = ax2.imshow(arr, aspect="auto", cmap="magma", vmin=0,
+                        vmax=np.percentile(arr, 99) if arr.size else 1, interpolation="nearest")
+        if "Current-frame marker" in trace_layers:
+            ax2.axvline(tfi, color="cyan", lw=1.5, alpha=0.9)
+        ax2.set_xlabel("Frame"); ax2.set_ylabel("Cell")
+        fig2.colorbar(im, ax=ax2, label="ΔF/F0i")
+        st.pyplot(fig2)
     frame_loop("trc" + sfx, tfi, tplay, tspd, len(frames))
 
 
@@ -1074,55 +1096,79 @@ if TAB_TRK in T:
 def render_stats(df, sfx):
     st_, dist_ = cc.metrics(df, threshold=peak_thr)
 
+    stat_sections = st.multiselect(
+        "Choose statistical results to display",
+        ["Peak dynamics", "Tissue-level summary", "Active-cell fraction"],
+        default=["Peak dynamics", "Tissue-level summary", "Active-cell fraction"],
+        key="stat_sections" + sfx,
+        help="Peak dynamics describes single-cell events. Tissue metrics summarize the field. "
+             "Active-cell fraction shows recruitment through time.")
+
     # ---------- per-cell peak dynamics, one point per cell ----------
-    st.subheader("Peak dynamics")
     fi = st.number_input("Frame interval (minutes per frame; leave at 1 to report in frames)",
                          0.001, 60.0, 1.0, step=0.1, key="fint" + sfx)
     feats = cc.peak_features(df, threshold=peak_thr, frame_interval=fi)
     unit = "min" if abs(fi - 1.0) > 1e-9 else "frames"
-    panels = [("n_peaks", "# peaks", ""),
-              ("t_first_peak", "1$^{st}$ peak", unit),
-              ("auc", "A.U.C.", ""),
-              ("amplitude", "Amplitude ($\\Delta$F/F$_0$)", ""),
-              ("fwhm", "F.W.H.M.", unit),
-              ("dt_peak", "$\\Delta t_{peak}$", unit)]
-    rng = np.random.default_rng(0)
-    fig, axes = plt.subplots(1, 6, figsize=(15, 3.8))
-    for ax, (col, title, un) in zip(axes, panels):
-        vals = feats[col].to_numpy(float)
-        vals = vals[~np.isnan(vals)]
-        if vals.size:
-            ax.boxplot(vals, widths=0.55, showfliers=False,
-                       boxprops=dict(color="0.35"), medianprops=dict(color="0.35"),
-                       whiskerprops=dict(color="0.35"), capprops=dict(color="0.35"))
-            ax.scatter(rng.normal(1, 0.055, vals.size), vals, s=16, alpha=0.4,
-                       color="0.45", edgecolors="none", zorder=3)
-        ax.set_ylabel(f"{title} ({un})" if un else title, fontsize=10)
-        ax.set_xticks([])
-        ax.yaxis.grid(True, ls="--", alpha=0.55)
-        ax.set_axisbelow(True)
-        for sp in ("top", "right"):
-            ax.spines[sp].set_visible(False)
-    n_ok = int(feats["n_peaks"].gt(0).sum())
-    fig.suptitle(f"{len(feats)} cells  ({n_ok} with at least one detected peak, "
-                 f"threshold {peak_thr} ΔF/F0i)", fontsize=10)
-    fig.tight_layout()
-    st.pyplot(fig)
-    st.download_button("⬇ per-cell peak features (CSV)", feats.to_csv(index=False).encode(),
-                       "peak_features.csv", "text/csv", key="dlfeat" + sfx)
-    st.caption("Box = median and quartiles, whiskers = 1.5 IQR, one grey point per cell. "
-               "Cells with no detected peak are excluded from the peak-shape panels.")
+    panel_map = {
+        "Number of peaks": ("n_peaks", "# peaks", ""),
+        "Time to first peak": ("t_first_peak", "1$^{st}$ peak", unit),
+        "Area under curve": ("auc", "A.U.C.", ""),
+        "Peak amplitude": ("amplitude", "Amplitude ($\\Delta$F/F$_0$)", ""),
+        "Peak width (FWHM)": ("fwhm", "F.W.H.M.", unit),
+        "Time between peaks": ("dt_peak", "$\\Delta t_{peak}$", unit),
+    }
+    if "Peak dynamics" in stat_sections:
+        st.subheader("Peak dynamics")
+        selected_panels = st.multiselect(
+            "Single-cell features to plot", list(panel_map), default=list(panel_map),
+            key="stat_features" + sfx,
+            help="Select only the event properties relevant to the biological question.")
+        panels = [panel_map[name] for name in selected_panels]
+        if panels:
+            rng = np.random.default_rng(0)
+            fig, axes = plt.subplots(1, len(panels), figsize=(max(4, 2.5 * len(panels)), 3.8))
+            axes = np.atleast_1d(axes)
+            for ax, (col, title, un) in zip(axes, panels):
+                vals = feats[col].to_numpy(float)
+                vals = vals[~np.isnan(vals)]
+                if vals.size:
+                    ax.boxplot(vals, widths=0.55, showfliers=False,
+                               boxprops=dict(color="0.35"), medianprops=dict(color="0.35"),
+                               whiskerprops=dict(color="0.35"), capprops=dict(color="0.35"))
+                    ax.scatter(rng.normal(1, 0.055, vals.size), vals, s=16, alpha=0.4,
+                               color="0.45", edgecolors="none", zorder=3)
+                ax.set_ylabel(f"{title} ({un})" if un else title, fontsize=10)
+                ax.set_xticks([]); ax.yaxis.grid(True, ls="--", alpha=0.55)
+                for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+            n_ok = int(feats["n_peaks"].gt(0).sum())
+            fig.suptitle(f"{len(feats)} cells ({n_ok} with a detected peak; "
+                         f"threshold {peak_thr} ΔF/F0i)", fontsize=10)
+            fig.tight_layout(); st.pyplot(fig)
+        show_feature_table = st.checkbox("Show per-cell feature table", False,
+                                         key="stat_table" + sfx)
+        if show_feature_table:
+            st.dataframe(feats, width="stretch", height=300)
+        st.download_button("⬇ per-cell peak features (CSV)", feats.to_csv(index=False).encode(),
+                           "peak_features.csv", "text/csv", key="dlfeat" + sfx)
+        st.caption("One point per cell. Cells without a detected peak are excluded from "
+                   "peak-shape features but remain in cell counts.")
 
-    st.subheader("Tissue-level metrics")
-    st.dataframe(pd.DataFrame([st_]).T.rename(columns={0: "value"}), width="stretch")
+    if "Tissue-level summary" in stat_sections:
+        st.subheader("Tissue-level metrics")
+        metric_table = pd.DataFrame([st_]).T.rename(columns={0: "value"})
+        selected_metrics = st.multiselect(
+            "Summary metrics", list(metric_table.index), default=list(metric_table.index),
+            key="tissue_metrics" + sfx)
+        st.dataframe(metric_table.loc[selected_metrics], width="stretch")
 
-    st.subheader("Fraction of cells above threshold, per frame")
-    cells = [c for c in df.columns if c.startswith("Cell_")]
-    frac = (df[cells].to_numpy(float) > peak_thr).mean(axis=1)
-    fig3, ax3 = plt.subplots(figsize=(11, 3.5))
-    ax3.plot(df["Frame"], frac, "-o", ms=3)
-    ax3.set_ylim(0, 1); ax3.set_xlabel("Frame"); ax3.set_ylabel("fraction active"); ax3.grid(alpha=0.3)
-    st.pyplot(fig3)
+    if "Active-cell fraction" in stat_sections:
+        st.subheader("Fraction of cells above threshold, per frame")
+        cells = [c for c in df.columns if c.startswith("Cell_")]
+        frac = (df[cells].to_numpy(float) > peak_thr).mean(axis=1)
+        fig3, ax3 = plt.subplots(figsize=(11, 3.5))
+        ax3.plot(df["Frame"], frac, "-o", ms=3)
+        ax3.set_ylim(0, 1); ax3.set_xlabel("Frame"); ax3.set_ylabel("fraction active")
+        ax3.grid(alpha=0.3); st.pyplot(fig3)
 
 
 with T[TAB_STA]:
