@@ -28,6 +28,26 @@ CPU fallback is expected on some Windows systems.
 
 Rerun `python install.py --cpu` if GPU package installation causes trouble.
 
+## Cellpose does not run on this computer
+
+Cellpose is optional. Install and launch the mask-based GUI without PyTorch or Cellpose using:
+
+```powershell
+python install.py --without-cellpose --launch
+```
+
+For rigid or elastic analysis, select **Load existing mask** under **Segmentation source**. Upload a
+2-D TIFF, PNG, or NPY label image aligned to membrane frame 0. Background must be 0; cells may be a
+binary foreground or separate positive integer IDs. CAFIN cleans and relabels it, then performs
+registration, trace extraction, normalization, and statistics without running Cellpose.
+
+To clean or convert a mask without any calcium analysis, open **Standalone mask cleaning**. This
+tool removes small components, fills holes per cell, optionally removes border cells, splits
+disconnected regions sharing an ID, and downloads a standard labelled TIFF.
+
+Cell tracking still requires a segmentation for every frame, so a single loaded mask cannot replace
+Cellpose in tracking mode.
+
 ## Elastic registration is unavailable
 
 Install the GUI requirement group inside the CAFIN environment:

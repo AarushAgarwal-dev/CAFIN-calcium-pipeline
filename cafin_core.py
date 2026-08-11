@@ -373,7 +373,13 @@ def cuda_status():
 def build_cellpose(gpu=False, model_type="cyto3"):
     """Create a CellposeModel on the best available device.
     Returns (model, use_channels, backend). `backend` is 'cpu' when no GPU is used."""
-    from cellpose import models
+    try:
+        from cellpose import models
+    except Exception as exc:
+        raise RuntimeError(
+            "Cellpose could not be imported. Run preflight.py, reinstall with "
+            "install.py --cpu, or choose 'Load existing mask' in the GUI to bypass Cellpose. "
+            f"Original error: {exc}") from exc
     dev, backend = None, "cpu"
     if gpu:
         ok, _, be = gpu_status()
@@ -407,28 +413,89 @@ def segment(reg_mem0, diameter=15, gpu=False, model_type="cyto3"):
     falls back to the 4.x default, so segmentation runs on either version.
     """
     img8 = stretch8(reg_mem0, clahe=True)        # local contrast helps boundary detection
-    model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
+    try:
+        model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
+    except Exception as init_exc:
+        if not gpu:
+            raise
+        try:
+            model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+        except Exception as cpu_init_exc:
+            raise RuntimeError(
+                "Cellpose could not start on the selected backend or CPU. Choose 'Load existing "
+                "mask' to bypass Cellpose. "
+                f"CPU error: {cpu_init_exc}; first backend error: {init_exc}") from cpu_init_exc
+    gpu_error = None
     try:
         masks = _cp_eval(model, img8, diameter, use_ch)
-    except Exception:                            # GPU backend failed -> redo on CPU
-        model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
-        masks = _cp_eval(model, img8, diameter, use_ch)
+    except Exception as exc:                     # GPU backend failed -> redo on CPU
+        gpu_error = exc
+        try:
+            model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+            masks = _cp_eval(model, img8, diameter, use_ch)
+        except Exception as cpu_exc:
+            raise RuntimeError(
+                "Cellpose segmentation failed on both the selected backend and CPU. "
+                "Use the GUI's 'Load existing mask' option to continue without Cellpose, or run "
+                "preflight.py and reinstall with install.py --cpu. "
+                f"CPU error: {cpu_exc}; first backend error: {gpu_error}") from cpu_exc
     return np.asarray(masks).astype(np.int32), (backend != "cpu")
 
 
-def _clean_mask(mask, min_area=60, fill_holes=True):
-    """Remove tiny objects, optionally fill holes, and re-label 1..N (light version
-    of the wound pipeline's clean step, used before per-frame tracking)."""
-    from skimage.morphology import remove_small_objects
+def clean_mask(mask, min_area=60, fill_holes=True, remove_border=False,
+               split_disconnected=True):
+    """Clean a binary or integer-labelled 2-D segmentation mask.
+
+    Small components are removed, holes are filled *within each cell label*, and
+    the result is relabelled sequentially from 1..N. Binary masks are converted to
+    connected-component labels. When ``split_disconnected`` is true, disconnected
+    islands carrying the same input ID become separate cells. Background is always 0.
+    """
     from scipy.ndimage import binary_fill_holes
     from skimage.measure import label as sklabel
-    m = np.asarray(mask).astype(np.int32)
-    if min_area > 0:
-        m = remove_small_objects(m, min_size=int(min_area))
-    if fill_holes:
-        filled = binary_fill_holes(m > 0)
-        m[(filled) & (m == 0)] = 0   # keep labels; holes inside a cell stay that cell
-    return sklabel(m > 0).astype(np.int32) if m.max() == 0 else m
+    from skimage.segmentation import clear_border
+
+    m = np.asarray(mask)
+    m = np.squeeze(m)
+    if m.ndim != 2:
+        raise ValueError(f"Mask must be a single 2-D image; received shape {m.shape}.")
+    if not np.issubdtype(m.dtype, np.number):
+        raise ValueError("Mask values must be numeric.")
+    if not np.all(np.isfinite(m)):
+        raise ValueError("Mask contains NaN or infinite values.")
+    if np.any(m < 0):
+        raise ValueError("Mask labels cannot be negative.")
+    m = np.rint(m).astype(np.int64)
+    ids = np.unique(m[m > 0])
+    if ids.size == 0:
+        return np.zeros(m.shape, dtype=np.int32)
+
+    components = []
+    is_binary = ids.size == 1
+    source_ids = [1] if is_binary else ids
+    source = (m > 0).astype(np.int32) if is_binary else m
+    for old_id in source_ids:
+        region = source == old_id
+        labelled = sklabel(region, connectivity=1) if (is_binary or split_disconnected) else region.astype(np.int32)
+        for component_id in range(1, int(labelled.max()) + 1):
+            component = labelled == component_id
+            if fill_holes:
+                component = binary_fill_holes(component)
+            if remove_border:
+                component = clear_border(component)
+            if int(component.sum()) >= int(max(0, min_area)):
+                components.append(component)
+
+    out = np.zeros(m.shape, dtype=np.int32)
+    # Larger cells win only where overlapping filled holes make labels compete.
+    for new_id, component in enumerate(sorted(components, key=lambda x: int(x.sum()), reverse=True), 1):
+        out[component & (out == 0)] = new_id
+    return out
+
+
+def _clean_mask(mask, min_area=60, fill_holes=True):
+    """Backward-compatible wrapper used by per-frame tracking."""
+    return clean_mask(mask, min_area=min_area, fill_holes=fill_holes)
 
 
 def segment_stack(images, diameter=15, gpu=False, model_type="cyto3",
@@ -437,15 +504,32 @@ def segment_stack(images, diameter=15, gpu=False, model_type="cyto3",
     `images` is a list/iterable of 2-D membrane frames. Builds the Cellpose model
     once and evaluates each frame. Returns (T,H,W) int array of cleaned masks."""
     imgs = [stretch8(im, clahe=True) for im in images]
-    model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
+    try:
+        model, use_ch, backend = build_cellpose(gpu=gpu, model_type=model_type)
+    except Exception as init_exc:
+        if not gpu:
+            raise
+        try:
+            model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+        except Exception as cpu_init_exc:
+            raise RuntimeError(
+                "Cellpose tracking could not start on the selected backend or CPU. "
+                f"CPU error: {cpu_init_exc}; first backend error: {init_exc}") from cpu_init_exc
     out = []
     n = len(imgs)
     for k, im in enumerate(imgs):
         try:
             m = _cp_eval(model, im, diameter, use_ch)
-        except Exception:                        # GPU backend failed -> continue on CPU
-            model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
-            m = _cp_eval(model, im, diameter, use_ch)
+        except Exception as gpu_exc:              # GPU backend failed -> continue on CPU
+            try:
+                model, use_ch, backend = build_cellpose(gpu=False, model_type=model_type)
+                m = _cp_eval(model, im, diameter, use_ch)
+            except Exception as cpu_exc:
+                raise RuntimeError(
+                    f"Cellpose failed on frame {k} on both the selected backend and CPU. "
+                    "For tracking, install a working Cellpose environment; for static analysis, "
+                    "choose 'Load existing mask' to bypass Cellpose. "
+                    f"CPU error: {cpu_exc}; first backend error: {gpu_exc}") from cpu_exc
         out.append(_clean_mask(np.asarray(m).astype(np.int32), min_area=min_area))
         if progress:
             progress((k + 1) / max(1, n), f"Segmenting frame {k + 1}/{n} ({backend})")

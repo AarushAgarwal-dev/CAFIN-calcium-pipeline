@@ -37,7 +37,8 @@ The pipeline runs in eight steps.
    non-rigid alignment uses itk-elastix B-spline. Registration is computed on the membrane channel
    and the same transform is applied to the calcium channel, so the two stay aligned.
 2. Segmentation. Cellpose (cyto3, channels=[2,0], diameter about 15 px) runs on the reference
-   membrane frame and returns a labelled cell mask.
+   membrane frame and returns a labelled cell mask. If Cellpose is unavailable, a binary or
+   integer-labelled TIFF, PNG, or NPY mask can be loaded directly and cleaned in the GUI.
 3. Background subtraction. Three signal-free regions are sampled in each frame. Values outside
    1.5x IQR are dropped, each region is reduced to its median, and the mean of the three medians
    is subtracted from the frame and clipped at zero.
@@ -62,12 +63,13 @@ If you would rather not use a terminal, double-click `install_windows.bat` on Wi
 `install_mac.command` on macOS. Both call the same installer.
 
 `install.py` creates a local `.venv` by default, so it does not alter your normal Python packages.
-Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--with-ai` for Amazon Bedrock, or
-`--with-paper` for manuscript generation. `--no-venv` is available for advanced users.
+Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--without-cellpose` for mask-only use,
+`--with-ai` for Amazon Bedrock, or `--with-paper` for manuscript generation. `--no-venv` is
+available for advanced users.
 
 To install the GUI by hand, use `pip install -r requirements-gui.txt`. Optional dependencies are in
-`requirements-ai.txt` and `requirements-paper.txt`. The processed-data paper workflow has its own
-smaller `REPRODUCE/requirements.txt`.
+`requirements-cellpose.txt`, `requirements-ai.txt`, and `requirements-paper.txt`. The
+processed-data paper workflow has its own smaller `REPRODUCE/requirements.txt`.
 
 ### Graphics card support
 
@@ -107,6 +109,15 @@ The three methods are:
 * Rigid (ECC): global motion correction with a fixed frame-0 mask.
 * Elastic (itk-elastix): non-rigid B-spline correction, at fast, balanced, or accurate quality.
 * Cell tracking: segments every frame and links cells into stable IDs, without registration.
+
+For rigid or elastic analysis, **Segmentation source** can be set to **Load existing mask**. The
+mask must align with frame 0, use 0 for background, and use non-zero integer cell IDs. The GUI can
+remove small objects, fill holes, remove border-touching cells, and relabel cells before extracting
+traces. This path does not import or run Cellpose.
+
+The **Standalone mask cleaning** panel works without running any pipeline step. It accepts binary
+or labelled TIFF, PNG, and NPY masks, previews cell numbers and areas, and downloads a cleaned
+integer-labelled TIFF.
 
 The tabs cover the registration overlay with frame playback, segmentation, ROI drawing, per-cell
 traces and a heatmap, PCA plus K-means clustering, tracking, statistics, and CSV or GIF export.

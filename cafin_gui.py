@@ -13,7 +13,7 @@ Registration / analysis methods (choose one):
 Extras: data preview, interactive ROI selection (before or after a run), frame navigation
 with auto-loop, PCA + K-means trace clustering, and optional AI interpretation via Bedrock.
 """
-import os, glob, re, time, sys
+import os, glob, re, time, sys, io
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -21,6 +21,7 @@ import streamlit as st
 from PIL import Image
 import imageio.v2 as imageio
 import skimage.io as skio
+import tifffile
 from skimage.segmentation import find_boundaries
 
 import cafin_core as cc
@@ -227,6 +228,39 @@ def detect_base(folder):
     return ""
 
 
+def read_mask_upload(uploaded):
+    """Read a Streamlit upload as a 2-D numeric mask with background label 0."""
+    if uploaded is None:
+        return None
+    raw = uploaded.getvalue()
+    name = uploaded.name.lower()
+    if name.endswith(".npy"):
+        arr = np.load(io.BytesIO(raw), allow_pickle=False)
+    else:
+        arr = skio.imread(io.BytesIO(raw))
+    arr = np.asarray(arr)
+    # TIFF readers sometimes retain a singleton page/channel dimension.
+    arr = np.squeeze(arr)
+    if arr.ndim == 3 and arr.shape[-1] in (3, 4):
+        rgb = arr[..., :3]
+        if np.array_equal(rgb[..., 0], rgb[..., 1]) and np.array_equal(rgb[..., 0], rgb[..., 2]):
+            arr = rgb[..., 0]
+        else:
+            raise ValueError("Color-coded RGB masks are ambiguous. Export an integer label image "
+                             "where background=0 and each cell has one integer ID.")
+    if arr.ndim != 2:
+        raise ValueError(f"Expected one 2-D mask, but the uploaded file has shape {arr.shape}.")
+    return arr
+
+
+def mask_tiff_bytes(mask):
+    """Serialize a label mask for a Streamlit download button."""
+    buf = io.BytesIO()
+    dtype = np.uint16 if int(np.max(mask)) <= np.iinfo(np.uint16).max else np.uint32
+    tifffile.imwrite(buf, np.asarray(mask, dtype=dtype))
+    return buf.getvalue()
+
+
 # =========================================================== SIDEBAR
 st.sidebar.title("CAFIN pipeline")
 st.sidebar.caption("Motion correction → segmentation → ΔF/F0i → statistics")
@@ -343,6 +377,36 @@ else:   # Cell tracking — exactly the wound-closure pipeline (segment -> clean
     st.sidebar.warning("Segments EVERY frame with Cellpose → slow on CPU. "
                        "Use **frame-step** below to subsample long series.")
 
+# --- segmentation source (static-mask analyses can bypass Cellpose completely) ---
+seg_source = "Cellpose"
+external_mask = None
+if not link_tracking:
+    st.sidebar.markdown("### Segmentation source")
+    seg_source = st.sidebar.radio(
+        "Reference-frame mask",
+        ["Run Cellpose", "Load existing mask"],
+        help="An existing binary or integer-labelled mask bypasses Cellpose. It must align with "
+             "frame 0; background must be 0.")
+    if seg_source == "Load existing mask":
+        _mask_file = st.sidebar.file_uploader(
+            "Mask file", type=["tif", "tiff", "png", "npy"], key="pipeline_mask_upload",
+            help="Accepted: 2-D binary mask or integer labels (0=background, 1..N=cells).")
+        _mc1, _mc2 = st.sidebar.columns(2)
+        _mask_min = _mc1.number_input("Min cell area", 0, 100000, 60, key="pipeline_mask_min")
+        _mask_fill = _mc2.checkbox("Fill holes", True, key="pipeline_mask_fill")
+        _mask_border = st.sidebar.checkbox("Remove border-touching cells", False,
+                                           key="pipeline_mask_border")
+        try:
+            _mask_raw = read_mask_upload(_mask_file)
+            if _mask_raw is not None:
+                external_mask = cc.clean_mask(_mask_raw, min_area=int(_mask_min),
+                                              fill_holes=_mask_fill,
+                                              remove_border=_mask_border)
+                st.sidebar.success(f"Mask ready: {int(external_mask.max())} cleaned cells, "
+                                   f"shape {external_mask.shape[1]}×{external_mask.shape[0]}")
+        except Exception as _mask_err:
+            st.sidebar.error(f"Mask could not be loaded: {_mask_err}")
+
 # --- GPU / CUDA ---
 cuda_ok, cuda_msg, gpu_backend = cc.gpu_status()
 use_gpu = st.sidebar.checkbox("Use GPU for segmentation", value=cuda_ok,
@@ -366,11 +430,68 @@ with st.sidebar.expander("Advanced parameters", expanded=False):
 roi_on = st.sidebar.checkbox("Restrict analysis to a region of interest (ROI)", value=False,
                              help="Draw a rectangle below; cells intersecting it are analyzed.")
 
-run = st.sidebar.button("▶  Run analysis", type="primary", width="stretch", disabled=not ok_data)
+_mask_needed = seg_source == "Load existing mask" and external_mask is None
+run = st.sidebar.button("▶  Run analysis", type="primary", width="stretch",
+                        disabled=(not ok_data or _mask_needed))
 
 st.title("Ca²⁺ transient analysis")
 st.caption(f"**Method:** {choice}  •  registration = `{method}`  •  cells = `{handling}`"
+           + (f"  •  segmentation = `{seg_source}`" if not link_tracking else "")
            + ("  •  ROI restricted" if roi_on else ""))
+
+
+# =========================================================== STANDALONE MASK CLEANING
+with st.expander("🧹 Standalone mask cleaning (no pipeline or Cellpose required)", expanded=False):
+    st.caption("Load a binary or labelled segmentation, clean it directly, inspect cell IDs and "
+               "areas, then download a standard integer-labelled TIFF. No registration, "
+               "segmentation model, or calcium analysis is run.")
+    _stand_file = st.file_uploader("Segmented mask", type=["tif", "tiff", "png", "npy"],
+                                   key="standalone_mask_upload")
+    _s1, _s2, _s3, _s4 = st.columns(4)
+    _stand_min = _s1.number_input("Minimum cell area (pixels)", 0, 100000, 60,
+                                  key="stand_mask_min")
+    _stand_fill = _s2.checkbox("Fill holes per cell", True, key="stand_mask_fill")
+    _stand_border = _s3.checkbox("Remove cells touching border", False, key="stand_mask_border")
+    _stand_split = _s4.checkbox("Split disconnected same-ID regions", True,
+                                key="stand_mask_split")
+    if _stand_file is not None:
+        try:
+            _stand_raw = read_mask_upload(_stand_file)
+            _stand_clean = cc.clean_mask(
+                _stand_raw, min_area=int(_stand_min), fill_holes=_stand_fill,
+                remove_border=_stand_border, split_disconnected=_stand_split)
+            _stand_before = cc.clean_mask(_stand_raw, min_area=0, fill_holes=False,
+                                          split_disconnected=True)
+            _raw_n = int(_stand_before.max())
+            _base = cc.stretch8((_stand_raw > 0).astype(np.uint8) * 255)
+            if ok_data:
+                try:
+                    _candidate = skio.imread(os.path.join(memf, f"{mem_base}0000.tif"))
+                    if _candidate.shape == _stand_clean.shape:
+                        _base = _candidate
+                except Exception:
+                    pass
+            _ov_raw = cc.numbered_mask_overlay(_base, _stand_before, clahe=True)
+            _ov_clean = cc.numbered_mask_overlay(_base, _stand_clean, clahe=True)
+            _v1, _v2 = st.columns(2)
+            _v1.image(_ov_raw, caption=f"Loaded mask: {_raw_n} non-zero input labels",
+                      width="stretch")
+            _v2.image(_ov_clean, caption=f"Cleaned mask: {int(_stand_clean.max())} cells",
+                      width="stretch")
+            from skimage.measure import regionprops_table
+            _areas = pd.DataFrame(regionprops_table(_stand_clean, properties=("label", "area")))
+            _q1, _q2, _q3, _q4 = st.columns(4)
+            _q1.metric("Input labels", _raw_n)
+            _q2.metric("Cleaned cells", int(_stand_clean.max()))
+            _q3.metric("Removed", max(0, _raw_n - int(_stand_clean.max())))
+            _q4.metric("Median area", f"{_areas['area'].median():.0f} px" if len(_areas) else "0 px")
+            st.dataframe(_areas.rename(columns={"label": "cell_id", "area": "area_px"}),
+                         width="stretch", height=220)
+            st.download_button("⬇ Download cleaned labelled mask (TIFF)",
+                               mask_tiff_bytes(_stand_clean), "cleaned_mask.tiff", "image/tiff",
+                               key="download_cleaned_mask")
+        except Exception as _stand_err:
+            st.error(f"Could not clean this mask: {_stand_err}")
 
 
 # =========================================================== ROI SELECTION (pre-run)
@@ -464,10 +585,25 @@ if run:
             raw_df = cc.extract_tracked_traces(reg["mask_per_frame"], ca_by_frame, frames, bg=do_bg)
             eff_handling = "tracking"
         else:                                                 # ---- static / warp-tracking ----
-            st.write(f"Segmenting reference frame (Cellpose cyto3, {dev})…")
             first_mem = skio.imread(os.path.join(memf, f"{mem_base}0000.tif"))
-            mask0, used_gpu = cc.segment(first_mem, diameter=diameter, gpu=use_gpu)
-            st.write(f"→ {int(mask0.max())} cells segmented on {'GPU' if used_gpu else 'CPU'}.")
+            if seg_source == "Load existing mask":
+                if external_mask is None:
+                    raise ValueError("Load a mask before running the analysis.")
+                if tuple(external_mask.shape) != tuple(first_mem.shape):
+                    raise ValueError(
+                        f"Mask shape {external_mask.shape} does not match frame-0 image shape "
+                        f"{first_mem.shape}. Export the mask in the original image coordinates.")
+                if int(external_mask.max()) == 0:
+                    raise ValueError("The cleaned mask contains no cells. Reduce the minimum area "
+                                     "or check that cells have non-zero labels.")
+                mask0 = external_mask.astype(np.int32, copy=True)
+                used_gpu = False
+                st.write(f"Using loaded mask → {int(mask0.max())} cleaned cells. Cellpose skipped.")
+            else:
+                st.write(f"Segmenting reference frame (Cellpose cyto3, {dev})…")
+                mask0, used_gpu = cc.segment(first_mem, diameter=diameter, gpu=use_gpu)
+                st.write(f"→ {int(mask0.max())} cells segmented on "
+                         f"{'GPU' if used_gpu else 'CPU'}.")
             st.write(f"Registering ({method}) …")
             reg = cc.register_series(memf, caf, mem_base, ca_base, n_use, method,
                                      do_tracking=(handling == "tracking"), mask0=mask0,
@@ -490,7 +626,8 @@ if run:
                      method=method, handling=eff_handling, link=link_tracking, tstats=tstats,
                      mem_base=mem_base, ca_base=ca_base, roi_ids=roi_ids,
                      f0_floor=f0_floor, dff_method=dff_method, do_bg=do_bg, f0i=f0i,
-                     roi_box=ss.get("roi_box") if roi_on else None, peak_thr=peak_thr)
+                     roi_box=ss.get("roi_box") if roi_on else None, peak_thr=peak_thr,
+                     segmentation_source=seg_source)
     ss["frame_idx"] = None  # reset navigation
 
 if "res" not in ss:
@@ -590,7 +727,10 @@ with T[TAB_REG]:
 
 # ---------------------------------------------------------- Segmentation
 with T[TAB_SEG]:
-    st.subheader(f"Cellpose segmentation — {int(mask0.max())} cells")
+    _seg_source_used = R.get("segmentation_source", "Cellpose")
+    st.subheader(f"Segmentation — {int(mask0.max())} cells")
+    st.caption(f"Source: {_seg_source_used}" +
+               (". Cellpose was not run." if _seg_source_used == "Load existing mask" else "."))
     st.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
              caption="Frame-0 membrane with numbered cell ROIs", width="stretch")
 
