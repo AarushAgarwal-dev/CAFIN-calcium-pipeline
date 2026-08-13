@@ -86,9 +86,11 @@ If you would rather not use a terminal, double-click `install_windows.bat` on Wi
 Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--with-ai` for Amazon Bedrock, or
 `--with-paper` for manuscript generation. `--no-venv` is available for advanced users.
 
-To install the GUI by hand, use `pip install -r requirements-gui.txt`. Optional dependencies are in
-`requirements-ai.txt` and `requirements-paper.txt`. The processed-data paper workflow has its own
-smaller `REPRODUCE/requirements.txt`.
+To install everything manually into an existing Python environment, use
+`python -m pip install -r requirements.txt`. This includes the GUI, Amazon Bedrock support,
+paper generation, and the reproduction workflow. To install only the GUI, use
+`python -m pip install -r requirements-gui.txt`. The processed-data paper workflow also keeps its
+smaller `REPRODUCE/requirements.txt` for users who do not need the GUI.
 
 ### Graphics card support
 

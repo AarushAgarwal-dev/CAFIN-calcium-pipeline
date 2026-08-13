@@ -1,0 +1,17 @@
+# Complete CAFIN environment: GUI, AI interpretation, paper generation, and reproduction.
+# Python 3.11 is recommended (supported: Python 3.10–3.12).
+#
+# For the most reliable GPU-aware installation, use install.py instead:
+#   python install.py --with-ai --with-paper --launch
+# This file is useful when a lab already manages its own Python environment:
+#   python -m pip install -r requirements.txt
+
+# Cellpose uses PyTorch. The CAFIN installer selects a CUDA, DirectML, ROCm,
+# Apple Silicon, or CPU build where available. This generic requirement enables
+# a CPU-compatible installation when pip is used directly.
+torch>=2.2,<3
+
+-r requirements-gui.txt
+-r requirements-ai.txt
+-r requirements-paper.txt
+-r REPRODUCE/requirements.txt
