@@ -9,25 +9,46 @@ cell tracking, trace clustering, and optional AI interpretation.
 
 ## Quick start
 
-One line downloads the code, creates an isolated `.venv`, installs the GUI, creates a synthetic
-demo recording, checks the installation, and opens the app. Python 3.11 is recommended.
+Install 64-bit Python 3.11 and Git first. The commands below create an isolated `.venv`, install
+the GUI, create a small demo recording, verify the installation, and open CAFIN in the browser.
 
-**macOS or Linux:**
+**macOS, first time:**
 
 ```bash
-git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git && cd CAFIN-calcium-pipeline && python3 install.py --launch
+git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git
+cd CAFIN-calcium-pipeline
+chmod +x install_mac.command run_gui.command
+./install_mac.command
 ```
 
-**Windows (PowerShell):**
+**macOS, update and run later:**
+
+```bash
+cd CAFIN-calcium-pipeline
+git pull
+./run_gui.command
+```
+
+**Windows PowerShell, first time:**
 
 ```powershell
-git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git; cd CAFIN-calcium-pipeline; python install.py --launch
+git clone https://github.com/AarushAgarwal-dev/CAFIN-calcium-pipeline.git
+cd CAFIN-calcium-pipeline
+.\install_windows.bat
 ```
 
-You need 64-bit Python 3.10 to 3.12 and git. Python 3.11 has the broadest compatibility with the
-scientific and GPU packages. Already have the folder? Run `python install.py --launch`. Next time,
-double-click
-`run_gui.bat` on Windows or `run_gui.command` on macOS.
+**Windows PowerShell, update and run later:**
+
+```powershell
+cd CAFIN-calcium-pipeline
+git pull
+.\run_gui.bat
+```
+
+Python 3.10 to 3.12 is supported; Python 3.11 has the broadest compatibility with the scientific
+and GPU packages. After the first install, you can also double-click `run_gui.bat` on Windows or
+`run_gui.command` on macOS. On macOS, right-click a `.command` file and choose **Open** if Finder
+blocks the first launch.
 
 ## How it works
 
@@ -110,6 +131,9 @@ The three methods are:
 
 The tabs cover the registration overlay with frame playback, segmentation, ROI drawing, per-cell
 traces and a heatmap, PCA plus K-means clustering, tracking, statistics, and CSV or GIF export.
+Every playback view has a **Prepare GIF** button, which builds a downloadable loop from the same
+frames at the selected playback speed. On macOS, **Browse** opens a native Finder folder chooser;
+you can always paste a trial or output folder path if a system policy blocks dialogs.
 
 ### Reproduce the study
 

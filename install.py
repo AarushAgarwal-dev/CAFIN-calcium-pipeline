@@ -115,7 +115,10 @@ def main():
     print("\nInstallation complete. Demo data is ready.\n"
           "Start later with run_gui.bat (Windows) or ./run_gui.command (macOS/Linux).")
     if args.launch:
-        return run([python, "-m", "streamlit", "run", "cafin_gui.py"], required=False)
+        # headless=false asks Streamlit to open the default browser on a normal desktop.
+        # Binding to loopback avoids exposing a local microscopy session to the network.
+        return run([python, "-m", "streamlit", "run", "cafin_gui.py",
+                    "--server.address=127.0.0.1", "--server.headless=false"], required=False)
     return 0
 
 

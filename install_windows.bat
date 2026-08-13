@@ -15,7 +15,7 @@ if %errorlevel%==0 (
     if %errorlevel%==0 (
         set "PY=python"
     ) else (
-        echo Python was not found. Install Python 3.9+ from https://www.python.org/downloads/
+        echo Python was not found. Install 64-bit Python 3.11 from https://www.python.org/downloads/
         echo Remember to tick "Add Python to PATH" during installation.
         pause
         exit /b 1

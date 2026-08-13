@@ -13,13 +13,12 @@ Registration / analysis methods (choose one):
 Extras: data preview, interactive ROI selection (before or after a run), frame navigation
 with auto-loop, PCA + K-means trace clustering, and optional AI interpretation via Bedrock.
 """
-import os, glob, re, time, sys
+import io, os, glob, re, time, sys, platform, subprocess
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-from PIL import Image
-import imageio.v2 as imageio
+from PIL import Image, ImageDraw
 import skimage.io as skio
 from skimage.segmentation import find_boundaries
 
@@ -156,8 +155,27 @@ def roi_box_selector(gray, key, current_box=None):
 
 
 def pick_folder(initial=None, title="Select folder"):
-    """Open a native folder-selection dialog. Works because the app runs locally
-    (the dialog opens on the machine running Streamlit). Returns a path or None."""
+    """Open a native folder picker and return ``(path, error_message)``.
+
+    macOS uses Finder's AppleScript dialog first because Tk folder dialogs can
+    fail when Streamlit is running from a background server process. Tk is kept
+    as a fallback for Windows, Linux, and unusual macOS setups.
+    """
+    errors = []
+    if platform.system() == "Darwin":
+        try:
+            safe_title = str(title).replace("\\", "\\\\").replace('"', '\\"')
+            script = (f'try\nPOSIX path of (choose folder with prompt "{safe_title}")\n'
+                      'on error number -128\nreturn ""\nend try')
+            result = subprocess.run(["osascript", "-e", script], text=True,
+                                    capture_output=True, timeout=90, check=False)
+            if result.returncode == 0:
+                selected = result.stdout.strip()
+                return (os.path.normpath(selected), None) if selected else (None, None)
+            errors.append(result.stderr.strip() or "macOS folder picker did not open")
+        except Exception as exc:
+            errors.append(f"macOS folder picker: {exc}")
+
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -168,9 +186,108 @@ def pick_folder(initial=None, title="Select folder"):
                                        initialdir=initial if initial and os.path.isdir(initial)
                                        else os.getcwd())
         root.destroy()
-        return path or None
-    except Exception:
-        return None
+        return (os.path.normpath(path), None) if path else (None, None)
+    except Exception as exc:
+        errors.append(f"Tk folder picker: {exc}")
+    return None, "; ".join(errors) or "No folder picker is available"
+
+
+def _as_rgb8(image):
+    """Convert a grayscale/RGB image into a GIF-safe uint8 RGB frame."""
+    arr = np.asarray(image)
+    if arr.ndim == 2:
+        arr = np.dstack([arr] * 3)
+    elif arr.ndim == 3 and arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    elif arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(f"GIF frames must be 2-D or RGB images, not shape {arr.shape}.")
+    if np.issubdtype(arr.dtype, np.floating):
+        max_value = float(np.nanmax(arr)) if arr.size else 0.0
+        if max_value <= 1.0:
+            arr = arr * 255.0
+    return np.nan_to_num(np.clip(arr, 0, 255), nan=0).astype(np.uint8)
+
+
+def _stack_gif_frames(*images, gap=6):
+    """Place image panels side by side, padding shorter panels with black."""
+    panels = [_as_rgb8(im) for im in images]
+    if not panels:
+        raise ValueError("No image panels were supplied for the GIF.")
+    height = max(im.shape[0] for im in panels)
+    width = sum(im.shape[1] for im in panels) + gap * max(0, len(panels) - 1)
+    out = np.zeros((height, width, 3), dtype=np.uint8)
+    x = 0
+    for panel in panels:
+        out[:panel.shape[0], x:x + panel.shape[1]] = panel
+        x += panel.shape[1] + gap
+    return out
+
+
+def _label_gif_frame(image, label):
+    """Add a compact frame label without modifying the scientific image data."""
+    pil = Image.fromarray(_as_rgb8(image))
+    draw = ImageDraw.Draw(pil)
+    draw.rectangle((4, 4, 10 + 7 * len(str(label)), 24), fill=(0, 0, 0))
+    draw.text((8, 7), str(label), fill=(255, 255, 255))
+    return np.asarray(pil)
+
+
+def _gif_frame_ids(frame_ids, max_frames=240):
+    """Keep full playback for short recordings and evenly sample long recordings."""
+    ids = list(frame_ids)
+    if len(ids) <= max_frames:
+        return ids
+    picks = np.linspace(0, len(ids) - 1, max_frames, dtype=int)
+    return [ids[i] for i in np.unique(picks)]
+
+
+def _gif_bytes(images, duration_s):
+    """Encode GIF bytes in memory so downloads work on Windows and macOS."""
+    frames = [_as_rgb8(im) for im in images]
+    if not frames:
+        raise ValueError("No usable frames were available for the GIF.")
+    height = max(im.shape[0] for im in frames)
+    width = max(im.shape[1] for im in frames)
+    padded = []
+    for frame in frames:
+        canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        canvas[:frame.shape[0], :frame.shape[1]] = frame
+        padded.append(Image.fromarray(canvas))
+    buffer = io.BytesIO()
+    padded[0].save(buffer, format="GIF", save_all=True, append_images=padded[1:],
+                   duration=max(20, int(float(duration_s) * 1000)), loop=0, disposal=2)
+    return buffer.getvalue(), len(padded)
+
+
+def gif_download_control(key, filename, build_frames, duration_s, max_frames=240):
+    """Prepare an in-memory GIF only on demand, then expose a download button."""
+    cache = f"_gif_export_{key}"
+    if st.button("🎞 Prepare GIF", key=cache + "_prepare",
+                 help="Creates a GIF from the same frames used by this playback."):
+        try:
+            with st.spinner("Preparing GIF…"):
+                images = build_frames()
+                data, count = _gif_bytes(images, duration_s)
+            ss[cache] = {"data": data, "count": count}
+        except Exception as exc:
+            ss.pop(cache, None)
+            st.error(f"Could not prepare this GIF: {exc}")
+    saved = ss.get(cache)
+    if saved:
+        st.download_button("⬇ Download GIF", saved["data"], file_name=filename,
+                           mime="image/gif", key=cache + "_download")
+        st.caption(f"GIF ready: {saved['count']} frame{'s' if saved['count'] != 1 else ''}. "
+                   "Long recordings are sampled evenly to keep downloads manageable.")
+
+
+def _figure_rgb(figure):
+    """Render a Matplotlib figure into one RGB GIF frame and release it."""
+    figure.canvas.draw()
+    width, height = figure.canvas.get_width_height()
+    image = np.frombuffer(figure.canvas.buffer_rgba(), dtype=np.uint8)
+    image = image.reshape(height, width, 4)[..., :3].copy()
+    plt.close(figure)
+    return image
 
 
 def find_trial_folders(root_dir, max_depth=3):
@@ -248,10 +365,13 @@ if "trial_path" not in ss:
 st.sidebar.markdown("### Data folder")
 _b1, _b2, _b3 = st.sidebar.columns(3)
 if _b1.button("📂 Browse…", width="stretch", help="Open a folder picker on this machine"):
-    _p = pick_folder(ss["trial_path"], "Select the trial folder (with membrane/ and ca2/)")
+    _p, _picker_error = pick_folder(ss["trial_path"], "Select the trial folder (with membrane/ and ca2/)")
     if _p:
         ss["trial_path"] = os.path.normpath(_p)
         st.rerun()
+    elif _picker_error:
+        st.sidebar.warning("The folder picker could not open. Paste the folder path below instead. "
+                           f"Details: {_picker_error}")
 if _b2.button("🔍 Find trials", width="stretch", help="Scan for folders containing membrane/ and ca2/"):
     found = find_trial_folders(APP_DIR) or find_trial_folders(os.path.dirname(APP_DIR))
     ss["found_trials"] = found
@@ -430,6 +550,22 @@ if ok_data and n_frames:
                     q4.metric("Calcium range", f"{int(pc.min())}–{int(pc.max())}")
             st.caption("Step through the raw frames to check the data and judge how much motion "
                        "there is before choosing a registration method.")
+
+            def _preview_gif_frames():
+                movie = []
+                for _frame_no in _gif_frame_ids(range(n_frames)):
+                    _mem_path = os.path.join(memf, f"{mem_base}{_frame_no:04d}.tif")
+                    _ca_path = os.path.join(caf, f"{ca_base}{_frame_no:04d}.tif")
+                    _mem = skio.imread(_mem_path) if os.path.exists(_mem_path) else None
+                    _ca = skio.imread(_ca_path) if os.path.exists(_ca_path) else None
+                    if _mem is None or _ca is None:
+                        continue
+                    _pair = _stack_gif_frames(cc.stretch8(_mem, clahe=True),
+                                              cc.stretch8(_ca, clahe=True))
+                    movie.append(_label_gif_frame(_pair, f"Frame {_frame_no}: membrane | calcium"))
+                return movie
+
+            gif_download_control("preview", "cafin_raw_preview.gif", _preview_gif_frames, pspd)
             frame_loop("prev", pfi, pplay, pspd, n_frames)
         except Exception as e:
             st.warning(f"Could not preview frames: {e}")
@@ -550,18 +686,8 @@ with T[TAB_REG]:
     st.subheader("Overlay  (green = frame 0, magenta = moving, white = aligned)")
     fr = [f for f in frames if f != 0] or frames
     n = len(fr)
-    if ss.get("frame_idx") is None:
-        ss["frame_idx"] = n - 1
-    b1, b2, b3, b4 = st.columns([1, 1, 2, 2])
-    if b1.button("◀ Prev"):
-        ss["frame_idx"] = (ss["frame_idx"] - 1) % n
-    if b2.button("Next ▶"):
-        ss["frame_idx"] = (ss["frame_idx"] + 1) % n
-    playing = b3.toggle("▶ Auto-loop", key="playing")
-    speed = b4.slider("loop speed (s/frame)", 0.05, 1.0, 0.05, 0.05)
-    idx = st.slider("Frame", 0, n - 1, int(ss["frame_idx"]))
-    ss["frame_idx"] = idx
-    fsel = fr[idx]
+    ridx, rplay, rspeed = frame_controls("reg", n, start=n - 1)
+    fsel = fr[ridx]
 
     first_mem = reg["raw_mem"][0]
     before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(fsel, first_mem))
@@ -570,23 +696,18 @@ with T[TAB_REG]:
     a.image(before, caption=f"BEFORE — frame {fsel}", width="stretch")
     b.image(after, caption=f"AFTER — frame {fsel}", width="stretch")
 
-    if st.button("Build overlay GIF (all frames)"):
-        gif = []
-        for f in fr:
-            bb = cc.two_color_overlay(first_mem, reg["raw_mem"][f])
-            aa = cc.two_color_overlay(first_mem, reg["reg_mem"][f])
-            gap = np.full((bb.shape[0], 6, 3), 40, np.uint8)
-            gif.append(np.hstack([bb, gap, aa]))
-        out = os.path.join(trial + "_output", "gui_overlay.gif")
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        imageio.mimsave(out, gif, duration=0.12)
-        ss["gif_path"] = out
-        st.image(out, caption="Left: before | Right: after", width="stretch")
+    def _registration_gif_frames():
+        movie = []
+        for _frame_no in _gif_frame_ids(fr):
+            _before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(_frame_no, first_mem))
+            _after = cc.two_color_overlay(first_mem, reg["reg_mem"].get(_frame_no, first_mem))
+            movie.append(_label_gif_frame(_stack_gif_frames(_before, _after),
+                                          f"Frame {_frame_no}: before | after"))
+        return movie
 
-    if playing:
-        time.sleep(speed)
-        ss["frame_idx"] = (idx + 1) % n
-        st.rerun()
+    gif_download_control("registration", "cafin_registration_overlay.gif",
+                         _registration_gif_frames, rspeed)
+    frame_loop("reg", ridx, rplay, rspeed, n)
 
 # ---------------------------------------------------------- Segmentation
 with T[TAB_SEG]:
@@ -605,6 +726,20 @@ with T[TAB_SEG]:
     sc1, sc2 = st.columns(2)
     sc1.image(_seg_mem, caption=f"Segmentation + membrane ({mem_base}), frame {sf}", width="stretch")
     sc2.image(_seg_ca, caption=f"Segmentation + calcium ({ca_base}), frame {sf}", width="stretch")
+
+    def _segmentation_gif_frames():
+        movie = []
+        for _frame_no in _gif_frame_ids(frames):
+            _mask = reg["mask_per_frame"].get(_frame_no, mask0) if R.get("link") else mask0
+            _mem = reg["reg_mem"].get(_frame_no, reg["reg_mem"][frames[0]])
+            _ca = reg["reg_ca"].get(_frame_no, _mem)
+            _pair = _stack_gif_frames(cc.numbered_mask_overlay(_mem, _mask, clahe=True),
+                                      cc.numbered_mask_overlay(_ca, _mask, clahe=True))
+            movie.append(_label_gif_frame(_pair, f"Frame {_frame_no}: membrane | calcium"))
+        return movie
+
+    gif_download_control("segmentation", "cafin_segmentation_overlays.gif",
+                         _segmentation_gif_frames, sspd)
     frame_loop("seg", sfi, splay, sspd, len(frames))
 
 # ---------------------------------------------------------- ROI tab
@@ -627,22 +762,41 @@ with T[TAB_ROI]:
                 st.rerun()
 
     if R.get("roi_box"):
-        st.subheader(f"Region of interest — {len(roi_ids)} cells intersect the rectangle")
+        _roi_ids = list(R.get("roi_ids") or [])
+        st.subheader(f"Region of interest — {len(_roi_ids)} cells intersect the rectangle")
         x1, y1, x2, y2 = R["roi_box"]
         rfi, rplay, rspd = frame_controls("roiv", len(frames))
         rf = frames[rfi]
-        rmask = reg["mask_per_frame"].get(rf, mask0) if R.get("link") else mask0
-        base_img = cc.stretch8(reg["reg_ca"].get(rf, reg["reg_mem"].get(rf, reg["reg_mem"][frames[0]])),
-                               clahe=True)
-        disp = np.dstack([base_img] * 3).astype(float)
-        inside = np.isin(rmask, roi_ids)
-        disp[find_boundaries(rmask, mode="outer")] = [190, 60, 60]
-        disp[inside] = 0.55 * disp[inside] + 0.45 * np.array([0, 200, 220])
-        disp = np.clip(disp, 0, 255).astype(np.uint8)
-        disp[y1:y2, x1:x1 + 2] = [255, 235, 0]; disp[y1:y2, x2 - 2:x2] = [255, 235, 0]
-        disp[y1:y1 + 2, x1:x2] = [255, 235, 0]; disp[y2 - 2:y2, x1:x2] = [255, 235, 0]
+
+        def _roi_display(_frame_no):
+            rmask = reg["mask_per_frame"].get(_frame_no, mask0) if R.get("link") else mask0
+            base_img = cc.stretch8(reg["reg_ca"].get(
+                _frame_no, reg["reg_mem"].get(_frame_no, reg["reg_mem"][frames[0]])), clahe=True)
+            display = np.dstack([base_img] * 3).astype(float)
+            inside = np.isin(rmask, _roi_ids)
+            display[find_boundaries(rmask, mode="outer")] = [190, 60, 60]
+            display[inside] = 0.55 * display[inside] + 0.45 * np.array([0, 200, 220])
+            display = np.clip(display, 0, 255).astype(np.uint8)
+            h, w = display.shape[:2]
+            xa, xb = sorted((max(0, min(w, int(x1))), max(0, min(w, int(x2)))))
+            ya, yb = sorted((max(0, min(h, int(y1))), max(0, min(h, int(y2)))))
+            if xb > xa and yb > ya:
+                display[ya:yb, xa:min(xa + 2, xb)] = [255, 235, 0]
+                display[ya:yb, max(xa, xb - 2):xb] = [255, 235, 0]
+                display[ya:min(ya + 2, yb), xa:xb] = [255, 235, 0]
+                display[max(ya, yb - 2):yb, xa:xb] = [255, 235, 0]
+            return display
+
+        disp = _roi_display(rf)
         st.image(disp, caption=f"ROI rectangle (yellow); intersecting cells (cyan), calcium frame {rf}",
                  width="stretch")
+
+        def _roi_gif_frames():
+            return [_label_gif_frame(_roi_display(_frame_no),
+                                     f"Frame {_frame_no}: ROI cells in cyan")
+                    for _frame_no in _gif_frame_ids(frames)]
+
+        gif_download_control("roi", "cafin_roi_playback.gif", _roi_gif_frames, rspd)
         frame_loop("roiv", rfi, rplay, rspd, len(frames))
     else:
         st.info("No ROI set. Drag a rectangle in the panel above to restrict the analysis to a "
@@ -724,6 +878,59 @@ def render_traces(df, sfx):
     else:
         st.caption(f"Each cell uses its own baseline frames (method: {_meth}), so there is no single "
                    f"band to shade. See the F0i panel below. Red/black line = current frame {tf}.")
+
+    def _trace_gif_frames():
+        movie = []
+        movie_indices = _gif_frame_ids(range(len(frames)), max_frames=120)
+        display_cells = [c for c in shown_cells if c in cells][:50]
+        heat = np.nan_to_num(df[cells].to_numpy(float)).T
+        heat_max = np.percentile(heat, 99) if heat.size else 1
+        for _frame_index in movie_indices:
+            _current_frame = frames[_frame_index]
+            _n_axes = 3 if show_heatmap else 2
+            figure, axes = plt.subplots(1, _n_axes, figsize=(4.8 * _n_axes, 3.6), dpi=100)
+            axes = np.atleast_1d(axes)
+            raw_ax, dff_ax = axes[0], axes[1]
+            if "Individual cells" in trace_layers:
+                for _cell in [c for c in display_cells if c in raw_cols]:
+                    raw_ax.plot(raw_sub["Frame"], raw_sub[_cell], lw=0.55, alpha=0.28,
+                                color="dimgray")
+                for _cell in display_cells:
+                    dff_ax.plot(df["Frame"], df[_cell], lw=0.55, alpha=0.28, color="steelblue")
+            if "Population mean" in trace_layers and raw_cols:
+                raw_ax.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=1.8,
+                            color="black", label="population mean")
+                dff_ax.plot(df["Frame"], df[cells].mean(axis=1), lw=1.8,
+                            color="crimson", label="population mean")
+            if "Baseline window" in trace_layers:
+                for _row in base_rows:
+                    if _row < len(frames):
+                        _x = frames[_row]
+                        raw_ax.axvspan(_x - 0.5, _x + 0.5, color="gold", alpha=0.16)
+                        dff_ax.axvspan(_x - 0.5, _x + 0.5, color="gold", alpha=0.16)
+            if "Current-frame marker" in trace_layers:
+                raw_ax.axvline(_current_frame, color="crimson", lw=1.4)
+                dff_ax.axvline(_current_frame, color="black", lw=1.4)
+            raw_ax.set(title="Raw intensity", xlabel="Frame", ylabel="a.u.")
+            dff_ax.set(title="ΔF/F0i", xlabel="Frame", ylabel="ΔF/F0i")
+            for axis in (raw_ax, dff_ax):
+                axis.grid(alpha=0.25)
+                if "Population mean" in trace_layers:
+                    axis.legend(fontsize=7)
+            if show_heatmap:
+                heat_ax = axes[2]
+                heat_ax.imshow(heat, aspect="auto", cmap="magma", vmin=0,
+                               vmax=heat_max if heat_max > 0 else 1, interpolation="nearest")
+                if "Current-frame marker" in trace_layers:
+                    heat_ax.axvline(_frame_index, color="cyan", lw=1.4)
+                heat_ax.set(title="Cell activity", xlabel="Frame", ylabel="Cell")
+            figure.suptitle(f"Frame {_current_frame}", fontsize=10)
+            figure.tight_layout()
+            movie.append(_figure_rgb(figure))
+        return movie
+
+    _trace_name = "cafin_traces_roi.gif" if "roi" in sfx else "cafin_traces_all_cells.gif"
+    gif_download_control("traces" + sfx, _trace_name, _trace_gif_frames, tspd, max_frames=120)
 
     # ---------------- F0i actually used, per cell ----------------
     with st.expander(f"F0i per cell  (ΔF/F0i = (F − F0i) / F0i,  floor {f0_floor:g})", expanded=False):
@@ -821,6 +1028,26 @@ def render_traces(df, sfx):
             st.caption(f"Background drift over the recording: {vals.min():.1f} to {vals.max():.1f} "
                        f"(spread {vals.max() - vals.min():.1f}). The regions should stay dark and "
                        f"cell-free in every frame; step through with the controls above to check.")
+
+            def _background_gif_frames():
+                movie = []
+                for _frame_no in _gif_frame_ids(frames):
+                    _image = _fixed8(ca_by_frame[_frame_no])
+                    _display = np.dstack([_image] * 3)
+                    for (_x1, _y1, _x2, _y2) in boxes:
+                        _display[_y1:_y2, _x1:_x1 + 2] = [0, 229, 255]
+                        _display[_y1:_y2, _x2 - 2:_x2] = [0, 229, 255]
+                        _display[_y1:_y1 + 2, _x1:_x2] = [0, 229, 255]
+                        _display[_y2 - 2:_y2, _x1:_x2] = [0, 229, 255]
+                    _mean, _ = bgv[_frame_no]
+                    movie.append(_label_gif_frame(
+                        _display, f"Frame {_frame_no}: background {_mean:.1f} a.u."))
+                return movie
+
+            _bg_gif_name = ("cafin_background_check_roi.gif" if "roi" in sfx
+                            else "cafin_background_check_all_cells.gif")
+            gif_download_control("background" + sfx, _bg_gif_name,
+                                 _background_gif_frames, bspd)
             frame_loop("bgchk" + sfx, bfi, bplay, bspd, len(frames))
         except Exception as e:
             st.warning(f"Could not build the background check: {e}")
@@ -1082,41 +1309,52 @@ if TAB_TRK in T:
                      else "Cell tracking — mask follows tissue deformation")
         memsrc = reg["reg_mem"] if link else reg["raw_mem"]
         nT = len(frames)
-        if ss.get("trk_idx") is None:
-            ss["trk_idx"] = nT - 1
-        t1, t2, t3, t4 = st.columns([1, 1, 2, 2])
-        if t1.button("◀ Prev", key="trk_prev"):
-            ss["trk_idx"] = (ss["trk_idx"] - 1) % nT
-        if t2.button("Next ▶", key="trk_next"):
-            ss["trk_idx"] = (ss["trk_idx"] + 1) % nT
-        trk_play = t3.toggle("▶ Auto-loop", key="trk_play")
-        trk_speed = t4.slider("loop speed (s/frame)", 0.05, 1.0, 0.05, 0.05, key="trk_speed")
-        tidx = st.slider("Frame", 0, nT - 1, int(ss["trk_idx"]), key="trk_slider")
-        ss["trk_idx"] = tidx
+        tidx, trk_play, trk_speed = frame_controls("trk", nT, start=nT - 1)
         ftrk = frames[tidx]
-        base_img = cc.stretch8(memsrc.get(ftrk, memsrc[frames[0]]), clahe=True)
-        tracked = reg["mask_per_frame"].get(ftrk, mask0)
-        if link:                                    # color each cell by its global id (stable hue)
-            disp = np.dstack([base_img] * 3).astype(float) * 0.4
-            cols = (plt.get_cmap("tab20")(np.linspace(0, 1, 20)) * 255)[:, :3]
-            for cid in np.unique(tracked):
-                if cid > 0:
-                    disp[tracked == cid] = cols[int(cid) % 20]
-            a, b = st.columns(2)
-            a.image(np.clip(disp, 0, 255).astype(np.uint8),
-                    caption=f"Tracked cells on frame {ftrk} (color = global id)", width="stretch")
-            dsn = np.dstack([base_img] * 3); dsn[find_boundaries(tracked, mode="outer")] = [0, 255, 0]
-            b.image(dsn, caption=f"Tracked boundaries on frame {ftrk}", width="stretch")
+
+        def _tracking_panels(frame_no):
+            """Return the exact two images shown in the tracking playback."""
+            _base = cc.stretch8(memsrc.get(frame_no, memsrc[frames[0]]), clahe=True)
+            _tracked = reg["mask_per_frame"].get(frame_no, mask0)
+            if link:                                  # stable global ID means stable colour
+                _colored = np.dstack([_base] * 3).astype(float) * 0.4
+                _colors = (plt.get_cmap("tab20")(np.linspace(0, 1, 20)) * 255)[:, :3]
+                for _cell_id in np.unique(_tracked):
+                    if _cell_id > 0:
+                        _colored[_tracked == _cell_id] = _colors[int(_cell_id) % 20]
+                _left = np.clip(_colored, 0, 255).astype(np.uint8)
+                _right = np.dstack([_base] * 3)
+                _right[find_boundaries(_tracked, mode="outer")] = [0, 255, 0]
+            else:
+                _left = np.dstack([_base] * 3)
+                _left[find_boundaries(_tracked, mode="outer")] = [0, 255, 0]
+                _right = np.dstack([_base] * 3)
+                _right[find_boundaries(mask0, mode="outer")] = [255, 80, 0]
+            return _left, _right
+
+        left_panel, right_panel = _tracking_panels(ftrk)
+        a, b = st.columns(2)
+        if link:
+            a.image(left_panel, caption=f"Tracked cells on frame {ftrk} (color = global id)",
+                    width="stretch")
+            b.image(right_panel, caption=f"Tracked boundaries on frame {ftrk}", width="stretch")
         else:
-            dt = np.dstack([base_img] * 3); dt[find_boundaries(tracked, mode="outer")] = [0, 255, 0]
-            dsn = np.dstack([base_img] * 3); dsn[find_boundaries(mask0, mode="outer")] = [255, 80, 0]
-            a, b = st.columns(2)
-            a.image(dt, caption=f"TRACKED mask on frame {ftrk} (green)", width="stretch")
-            b.image(dsn, caption=f"STATIC frame-0 mask on frame {ftrk} (orange)", width="stretch")
-        if trk_play:                                    # auto-loop through frames
-            time.sleep(trk_speed)
-            ss["trk_idx"] = (tidx + 1) % nT
-            st.rerun()
+            a.image(left_panel, caption=f"TRACKED mask on frame {ftrk} (green)", width="stretch")
+            b.image(right_panel, caption=f"STATIC frame-0 mask on frame {ftrk} (orange)",
+                    width="stretch")
+
+        def _tracking_gif_frames():
+            movie = []
+            for _frame_no in _gif_frame_ids(frames):
+                _left, _right = _tracking_panels(_frame_no)
+                _label = (f"Frame {_frame_no}: stable IDs" if link
+                          else f"Frame {_frame_no}: tracked (green), static (orange)")
+                movie.append(_label_gif_frame(_stack_gif_frames(_left, _right), _label))
+            return movie
+
+        gif_download_control("tracking", "cafin_tracking_playback.gif",
+                             _tracking_gif_frames, trk_speed)
+        frame_loop("trk", tidx, trk_play, trk_speed, nT)
     else:
         st.info("Pick **Cell tracking** in the sidebar to follow cells across frames.")
 
@@ -1210,10 +1448,13 @@ with T[TAB_DL]:
         ss["save_dir"] = trial + "_output"
     sd1, sd2 = st.columns([1, 3])
     if sd1.button("📂 Choose folder…", width="stretch"):
-        _sp = pick_folder(ss["save_dir"], "Select a folder to save the results into")
+        _sp, _save_picker_error = pick_folder(ss["save_dir"], "Select a folder to save the results into")
         if _sp:
             ss["save_dir"] = os.path.normpath(_sp)
             st.rerun()
+        elif _save_picker_error:
+            st.warning("The folder picker could not open. Paste an output path in the box instead. "
+                       f"Details: {_save_picker_error}")
     _sd = sd2.text_input("Output folder", value=ss["save_dir"])
     if _sd and os.path.normpath(_sd) != os.path.normpath(ss["save_dir"]):
         ss["save_dir"] = os.path.normpath(_sd)
@@ -1234,8 +1475,6 @@ with T[TAB_DL]:
                                                                    ss["cluster_df"])
     if R.get("link") and reg.get("mask_per_frame"):
         _avail["Tracked masks (tracked_masks.tiff)"] = ("tracked_masks.tiff", "stack", None)
-    if ss.get("gif_path") and os.path.exists(ss["gif_path"]):
-        _avail["Registration overlay GIF"] = ("registration_overlay.gif", "copy", ss["gif_path"])
     for _k, _lbl in (("ai_story", "AI findings — clusters (ai_findings_clusters.md)"),
                      ("ai_story_full", "AI findings — full time-course (ai_findings_timecourse.md)")):
         if ss.get(_k):
@@ -1260,9 +1499,6 @@ with T[TAB_DL]:
                                                      if f in reg["mask_per_frame"]]).astype(np.uint16))
                 elif kind == "text":
                     open(dest, "w", encoding="utf-8").write(obj)
-                elif kind == "copy":
-                    import shutil
-                    shutil.copyfile(obj, dest)
                 written.append(fname)
             st.success(f"Saved {len(written)} file(s) to {ss['save_dir']}")
             st.caption(", ".join(written))
@@ -1282,6 +1518,3 @@ with T[TAB_DL]:
                            "roi_cells_normalized.csv", "text/csv")
     st.download_button("⬇ metrics (CSV)", pd.DataFrame([stats]).to_csv(index=False).encode(),
                        "metrics.csv", "text/csv")
-    if "gif_path" in ss and os.path.exists(ss["gif_path"]):
-        with open(ss["gif_path"], "rb") as fh:
-            st.download_button("⬇ overlay GIF", fh.read(), "registration_overlay.gif", "image/gif")

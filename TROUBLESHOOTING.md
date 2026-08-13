@@ -13,6 +13,20 @@ Run `\.venv\Scripts\python preflight.py --data "C:\path\to\trial"` on Windows, o
 `.venv/bin/python preflight.py --data /path/to/trial` on macOS/Linux, to diagnose an installation
 or dataset before analysis.
 
+## macOS: the app or Browse button does not open
+
+Use the repository's launcher rather than a global Streamlit installation:
+
+```bash
+chmod +x install_mac.command run_gui.command
+./install_mac.command
+```
+
+After installation, use `./run_gui.command`. It starts CAFIN at `http://localhost:8501` and asks
+Streamlit to open your browser. If Finder prevents the first double-click, right-click the
+`.command` file and choose **Open**. The app's **Browse** buttons use Finder on macOS; if macOS
+blocks the dialog, paste the full trial or output-folder path into the adjacent text field.
+
 ## The GUI opens but Run analysis is disabled
 
 Choose a folder containing `membrane/` and `ca2/`. Both must contain the same number of TIFF files,

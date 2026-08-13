@@ -1,16 +1,19 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # CAFIN installer for macOS and Linux. Double-click on macOS, or run: bash install_mac.command
-cd "$(dirname "$0")" || exit 1
+set -u
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
 
-if command -v python3.11 >/dev/null 2>&1; then
-    PY=python3.11
-elif command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
-else
-    echo "Python was not found. Install Python 3.9 or newer:"
-    echo "  macOS:  brew install python   (or download from python.org)"
+# Scientific packages are most dependable on Python 3.10–3.12. Prefer 3.11.
+for CANDIDATE in python3.11 python3.12 python3.10 python3 python; do
+    if command -v "$CANDIDATE" >/dev/null 2>&1; then
+        PY="$CANDIDATE"
+        break
+    fi
+done
+if [ -z "${PY:-}" ]; then
+    echo "Python was not found. Install 64-bit Python 3.11:"
+    echo "  macOS:  brew install python@3.11   (or download from python.org)"
     echo "  Linux:  sudo apt install python3 python3-pip python3-venv"
     read -r -p "Press Enter to close."
     exit 1
