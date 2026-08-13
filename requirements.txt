@@ -1,17 +1,45 @@
 # Complete CAFIN environment: GUI, AI interpretation, paper generation, and reproduction.
-# Python 3.11 is recommended (supported: Python 3.10–3.12).
 #
-# For the most reliable GPU-aware installation, use install.py instead:
+# Python is installed separately, not through pip.
+# Required Python: 3.10 to 3.12 (3.11 recommended).
+# Install this file with: python -m pip install -r requirements.txt
+#
+# For a GPU-aware installation, prefer:
 #   python install.py --with-ai --with-paper --launch
-# This file is useful when a lab already manages its own Python environment:
-#   python -m pip install -r requirements.txt
 
-# Cellpose uses PyTorch. The CAFIN installer selects a CUDA, DirectML, ROCm,
-# Apple Silicon, or CPU build where available. This generic requirement enables
-# a CPU-compatible installation when pip is used directly.
+# Basic Python package tools
+pip>=23
+setuptools>=68
+wheel>=0.41
+
+# Core scientific computing and plots
+numpy>=1.26,<3
+pandas>=2.1,<3
+scipy>=1.11,<2
+matplotlib>=3.8,<4
+scikit-learn>=1.3,<2
+
+# Images and microscopy data
+opencv-python>=4.8,<5
+scikit-image>=0.22,<0.26
+tifffile>=2023.9
+imageio>=2.31,<3
+pillow>=10,<13
+
+# Interactive GUI
+streamlit>=1.40,<2
+plotly>=5.18,<7
+
+# Segmentation, registration, and tracking
+# Generic PyTorch is CPU-compatible. install.py selects CUDA, DirectML, ROCm,
+# or Apple Silicon support when the hardware and operating system support it.
 torch>=2.2,<3
+cellpose>=3.1,<5
+itk-elastix>=0.20,<1
+SimpleITK>=2.3,<3
 
--r requirements-gui.txt
--r requirements-ai.txt
--r requirements-paper.txt
--r REPRODUCE/requirements.txt
+# Optional AI interpretation through Amazon Bedrock
+boto3>=1.34,<2
+
+# Paper generation and reproducibility
+python-docx>=1.1,<2
