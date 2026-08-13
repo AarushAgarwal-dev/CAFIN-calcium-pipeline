@@ -9,6 +9,10 @@ normal Python installation.
 python install.py --launch
 ```
 
+CAFIN pins Cellpose 3.1.1.3, NumPy 1.26.4, and PyTorch 2.2.2 because this is the tested
+`cyto3` environment. Use Python 3.10 or 3.11. Python 3.12+ can install newer scientific packages,
+but is intentionally rejected by the one-step installer because it cannot reproduce this pinned stack.
+
 Run `\.venv\Scripts\python preflight.py --data "C:\path\to\trial"` on Windows, or
 `.venv/bin/python preflight.py --data /path/to/trial` on macOS/Linux, to diagnose an installation
 or dataset before analysis.

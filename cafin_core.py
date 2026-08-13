@@ -22,6 +22,12 @@ from skimage.segmentation import find_boundaries
 from scipy.signal import find_peaks
 warnings.filterwarnings("ignore")
 
+# NumPy 1.26, used by the stable Cellpose 3 environment, names this integration
+# function ``trapz``. NumPy 2 added ``trapezoid``. Keep one spelling throughout
+# CAFIN so the same calculations run in either supported environment.
+if not hasattr(np, "trapezoid"):
+    np.trapezoid = np.trapz
+
 # ----------------------------------------------------------------- basics
 def count_frames(folder, base):
     return len([f for f in os.listdir(folder) if f.startswith(base) and f.endswith(".tif")])
@@ -311,13 +317,13 @@ def gpu_status():
         hint = ("For an AMD or Intel GPU on Windows install DirectML:\n"
                 "    pip install torch-directml\n"
                 "(NVIDIA instead: pip install torch --index-url "
-                "https://download.pytorch.org/whl/cu124)")
+                "https://download.pytorch.org/whl/cu121)")
     elif vendor == "amd":
         hint = ("For an AMD GPU on Linux install a ROCm build:\n"
-                "    pip install torch --index-url https://download.pytorch.org/whl/rocm6.2")
+                "    pip install torch --index-url https://download.pytorch.org/whl/rocm5.7")
     else:
         hint = ("Install a CUDA build:\n"
-                "    pip install torch --index-url https://download.pytorch.org/whl/cu124")
+                "    pip install torch --index-url https://download.pytorch.org/whl/cu121")
     build = "CPU-only build" if "+cpu" in torch.__version__ else "no GPU backend"
     return False, f"No GPU backend ({build}, torch {torch.__version__}).\n{hint}", "none"
 
@@ -384,10 +390,24 @@ def build_cellpose(gpu=False, model_type="cyto3"):
     kw = {"gpu": dev is not None}
     if dev is not None:
         kw["device"] = dev                       # CUDA / ROCm / DirectML / MPS device
-    try:                                         # Cellpose 3.x API (cyto3 + channels)
-        return models.CellposeModel(model_type=model_type, **kw), True, backend
-    except TypeError:                            # Cellpose 4.x (cpsam, no model_type/channels)
-        return models.CellposeModel(**kw), False, backend
+
+    def create(args):
+        try:                                     # Cellpose 3.x API (cyto3 + channels)
+            return models.CellposeModel(model_type=model_type, **args), True
+        except TypeError:                        # Cellpose 4.x (cpsam, no model_type/channels)
+            return models.CellposeModel(**args), False
+
+    try:
+        model, use_channels = create(kw)
+        return model, use_channels, backend
+    except Exception:
+        # A driver can report an available GPU but fail while Cellpose creates
+        # its model (notably on mismatched MPS/DirectML installations). Keep
+        # the GUI usable by creating the same model on CPU instead.
+        if dev is None:
+            raise
+        model, use_channels = create({"gpu": False})
+        return model, use_channels, "cpu"
 
 
 def _cp_eval(model, img8, diameter, use_ch):

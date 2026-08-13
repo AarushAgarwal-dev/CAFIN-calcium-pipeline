@@ -4,15 +4,15 @@ set -u
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-# Scientific packages are most dependable on Python 3.10–3.12. Prefer 3.11.
-for CANDIDATE in python3.11 python3.12 python3.10 python3 python; do
+# The pinned Cellpose 3 environment supports Python 3.10 and 3.11. Prefer 3.11.
+for CANDIDATE in python3.11 python3.10; do
     if command -v "$CANDIDATE" >/dev/null 2>&1; then
         PY="$CANDIDATE"
         break
     fi
 done
 if [ -z "${PY:-}" ]; then
-    echo "Python was not found. Install 64-bit Python 3.11:"
+    echo "Python 3.10 or 3.11 was not found. Install 64-bit Python 3.11:"
     echo "  macOS:  brew install python@3.11   (or download from python.org)"
     echo "  Linux:  sudo apt install python3 python3-pip python3-venv"
     read -r -p "Press Enter to close."

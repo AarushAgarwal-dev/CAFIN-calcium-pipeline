@@ -1,2 +1,2 @@
 # Optional Amazon Bedrock interpretation in the Clustering tab.
-boto3>=1.34,<2
+boto3==1.43.70

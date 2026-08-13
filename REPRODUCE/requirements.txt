@@ -2,8 +2,9 @@
 # For the interactive raw-image GUI, use ../requirements-gui.txt instead.
 
 # --- analysis + figures + paper (all that reproduce.py / generate_paper.py need) ---
-numpy>=1.24
+# Keep paper metrics consistent with the main GUI environment.
+numpy==1.26.4
 pandas>=2.0
 scipy>=1.10
 matplotlib>=3.7
-python-docx>=1.1
+python-docx==1.2.0

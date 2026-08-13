@@ -45,8 +45,8 @@ git pull
 .\run_gui.bat
 ```
 
-Python 3.10 to 3.12 is supported; Python 3.11 has the broadest compatibility with the scientific
-and GPU packages. After the first install, you can also double-click `run_gui.bat` on Windows or
+Python 3.10 or 3.11 is supported; Python 3.11 has the broadest compatibility with the pinned
+scientific and GPU packages. After the first install, you can also double-click `run_gui.bat` on Windows or
 `run_gui.command` on macOS. On macOS, right-click a `.command` file and choose **Open** if Finder
 blocks the first launch.
 
@@ -83,6 +83,8 @@ If you would rather not use a terminal, double-click `install_windows.bat` on Wi
 `install_mac.command` on macOS. Both call the same installer.
 
 `install.py` creates a local `.venv` by default, so it does not alter your normal Python packages.
+It installs Cellpose 3.1.1.3, NumPy 1.26.4, and the matching PyTorch 2.2.2 environment used by
+the manuscript workflow rather than allowing a later Cellpose or NumPy release to change results.
 Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--with-ai` for Amazon Bedrock, or
 `--with-paper` for manuscript generation. `--no-venv` is available for advanced users.
 
@@ -99,10 +101,10 @@ Cellpose segmentation is the slow step, and it is the part that runs on the GPU.
 
 | Hardware | Backend | Installed by |
 |---|---|---|
-| NVIDIA, Windows or Linux | CUDA | `pip install torch --index-url https://download.pytorch.org/whl/cu124` |
+| NVIDIA, Windows or Linux | CUDA | `pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121` |
 | AMD or Intel, Windows | DirectML | `pip install torch-directml` |
-| AMD, Linux | ROCm | `pip install torch --index-url https://download.pytorch.org/whl/rocm6.2` |
-| Apple Silicon | MPS | stock `pip install torch` |
+| AMD, Linux | ROCm | `pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/rocm5.7` |
+| Apple Silicon | MPS | `pip install torch==2.2.2 torchvision==0.17.2` |
 
 The installer picks the right one automatically. The GUI shows which backend it found next to the
 "Use GPU for segmentation" checkbox. If a GPU backend fails partway through a run, segmentation

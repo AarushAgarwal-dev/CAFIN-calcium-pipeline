@@ -11,8 +11,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 VENV = os.path.join(HERE, ".venv")
 REQ_GUI = os.path.join(HERE, "requirements-gui.txt")
-CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
-ROCM_INDEX = "https://download.pytorch.org/whl/rocm6.2"
+# Cellpose 3.1 cyto3 is the stable path used by CAFIN. These matching
+# PyTorch wheels work on Python 3.10/3.11 and avoid Cellpose 4's MPS/SAM path.
+TORCH_VERSION = "2.2.2"
+TORCHVISION_VERSION = "0.17.2"
+CUDA_INDEX = "https://download.pytorch.org/whl/cu121"
+ROCM_INDEX = "https://download.pytorch.org/whl/rocm5.7"
 
 
 def run(cmd, required=True, cwd=HERE):
@@ -52,18 +56,19 @@ def gpu_vendor():
 
 def install_torch(python, vendor, cpu=False):
     pip = [python, "-m", "pip", "install"]
+    stable = [f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}"]
     if cpu or vendor == "none" or vendor == "apple":
-        return run(pip + ["torch"])
+        return run(pip + stable)
     if vendor == "nvidia":
-        return run(pip + ["torch", "--index-url", CUDA_INDEX])
+        return run(pip + stable + ["--index-url", CUDA_INDEX])
     if vendor == "amd" and platform.system() == "Linux":
-        return run(pip + ["torch", "--index-url", ROCM_INDEX])
+        return run(pip + stable + ["--index-url", ROCM_INDEX])
     if vendor in ("amd", "intel") and platform.system() == "Windows":
         # DirectML is optional and version-sensitive. Failure is followed by a tested CPU fallback.
         if run(pip + ["torch-directml"], required=False) == 0:
             return 0
         print("DirectML was unavailable for this Python version. Using CPU PyTorch instead.")
-    return run(pip + ["torch"])
+    return run(pip + stable)
 
 
 def main():
@@ -80,12 +85,10 @@ def main():
 
     print(f"CAFIN installer\n  OS: {platform.system()} {platform.release()}\n"
           f"  Bootstrap Python: {sys.version.split()[0]}")
-    if sys.version_info < (3, 10):
-        print("CAFIN requires Python 3.10 or newer. Python 3.11 is recommended.")
+    if not ((3, 10) <= sys.version_info[:2] <= (3, 11)):
+        print("CAFIN's pinned Cellpose 3 environment requires Python 3.10 or 3.11.\n"
+              "Install 64-bit Python 3.11, then run this installer again.")
         return 1
-    if sys.version_info >= (3, 13):
-        print("WARNING: Python 3.13+ is not fully supported by every Cellpose/GPU package.\n"
-              "Python 3.11 is strongly recommended. Installation will continue with CPU fallback.")
 
     python = sys.executable
     if not args.no_venv:

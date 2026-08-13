@@ -1,9 +1,17 @@
-# Tested CAFIN GUI environment. Python 3.11 is recommended.
-numpy>=1.26,<3
+# CAFIN GUI runtime. Python 3.10 or 3.11 is required; 3.11 is recommended.
+#
+# These pins deliberately keep the Cellpose 3 cyto3 workflow used in the
+# manuscript.  They avoid the Cellpose 4 SAM/MPS BFloat16 path and the NumPy 2
+# binary-ABI mismatch seen with older PyTorch builds.
+numpy==1.26.4
 pandas>=2.1,<3
 scipy>=1.11,<2
 matplotlib>=3.8,<4
-opencv-python>=4.8,<5
+# Use exactly one OpenCV distribution. CAFIN uses Streamlit rather than
+# cv2.imshow(). OpenCV 4.9 has no Python 3.11 Intel-macOS wheel, so that
+# platform receives its last compatible 4.6 wheel instead.
+opencv-python-headless==4.9.0.80; platform_system != "Darwin" or platform_machine != "x86_64"
+opencv-python==4.6.0.66; platform_system == "Darwin" and platform_machine == "x86_64"
 scikit-image>=0.22,<0.26
 tifffile>=2023.9
 imageio>=2.31,<3
@@ -11,6 +19,11 @@ pillow>=10,<13
 streamlit>=1.40,<2
 plotly>=5.18,<7
 scikit-learn>=1.3,<2
-cellpose>=3.1,<5
+numba==0.62.1
+llvmlite==0.45.1
+cellpose==3.1.1.3
 itk-elastix>=0.20,<1
 SimpleITK>=2.3,<3
+
+# install.py installs the matching torch/torchvision build before this file.
+# For a manual CPU or Apple Silicon install, use the complete requirements.txt.

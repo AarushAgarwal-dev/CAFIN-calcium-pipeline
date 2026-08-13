@@ -6,11 +6,11 @@ graph inline.
 
 ## Install
 ```bash
-pip install streamlit cellpose opencv-python scikit-image tifffile imageio pillow pandas scipy natsort SimpleITK
+python -m pip install -r requirements.txt
 ```
-(`itk-elastix` is optional; on this machine it is blocked by Windows
-Application Control, so the elastic mode uses **SimpleITK** B-spline instead —
-the same B-spline registration described in the manuscript.)
+Use Python 3.10 or 3.11, preferably 3.11. This installs the pinned Cellpose 3
+cyto3 environment used by CAFIN. `requirements-gui.txt` is the smaller GUI-only
+list used by `install.py`; it expects PyTorch to be installed first by the installer.
 
 ## Run
 ```bash
@@ -35,9 +35,9 @@ usable GPU it safely falls back to CPU.
 CUDA works only with a CUDA build of PyTorch. The default install is CPU-only
 (`torch ...+cpu`). To enable the GPU:
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
 ```
-(match `cu124`/`cu121`/etc. to your installed CUDA driver). The standalone
+(the pinned CUDA 12.1 build is used by the CAFIN installer). The standalone
 scripts (`run_pipeline_fixed.py`, `cafin_pipeline.py`) auto-use the GPU when one
 is present.
 

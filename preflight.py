@@ -44,8 +44,9 @@ def main():
     ap.add_argument("--data", help="trial folder containing membrane/ and ca2/")
     ap.add_argument("--strict", action="store_true", help="fail when a core package is missing")
     args = ap.parse_args()
+    supported_python = (3, 10) <= sys.version_info[:2] <= (3, 11)
     print(f"Python {sys.version.split()[0]}: "
-          f"{'recommended' if (3, 10) <= sys.version_info[:2] <= (3, 12) else 'not tested; 3.11 recommended'}")
+          f"{'supported by the pinned Cellpose 3 stack' if supported_python else 'unsupported; install Python 3.11'}")
     missing = []
     for label, module in CORE.items():
         try:

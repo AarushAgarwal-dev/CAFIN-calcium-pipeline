@@ -3,7 +3,7 @@ cafin_pipeline.py  --  parameterized, corrected CAFIN pipeline.
 
 Given a trial folder (with membrane/ and ca2/ tiff stacks) it:
   1. rigid ECC registers membrane -> frame0, applies warp to calcium
-  2. Cellpose 4.x (cpsam) segments cells on registered frame0 membrane
+  2. Cellpose cyto3 (with 3.x/4.x compatibility) segments the registered frame-0 membrane
   3. extracts per-cell calcium traces and computes dF/F0
 
 dF/F0 (per user's choice): F and F0 are taken from the RAW (registered,
@@ -21,6 +21,7 @@ import tifffile
 import skimage.io as skio
 from skimage.measure import regionprops
 from scipy.signal import find_peaks
+import cafin_core as cc
 warnings.filterwarnings("ignore")
 
 PEAK_THRESHOLD = 0.5     # dF/F0 to count as a transient
@@ -69,18 +70,16 @@ def _register(data_root, mem_base, ca_base, num_frames, out):
 
 
 def _gpu_available():
+    """Use the shared CUDA, DirectML, and Apple-MPS detector."""
     try:
-        import torch
-        return torch.cuda.is_available()
+        return cc.gpu_status()[0]
     except Exception:
         return False
 
 
 def _segment(raw_dir, out):
-    from cellpose import models
-    img8 = _stretch8(skio.imread(os.path.join(raw_dir, "m0000.tif")))
-    model = models.CellposeModel(gpu=_gpu_available())   # CUDA if present, else CPU
-    masks = model.eval(img8, diameter=15, flow_threshold=0.4, cellprob_threshold=0.0)[0]
+    img = skio.imread(os.path.join(raw_dir, "m0000.tif"))
+    masks, _used_gpu = cc.segment(img, diameter=15, gpu=_gpu_available(), model_type="cyto3")
     masks = np.asarray(masks).astype(np.uint16)
     seg = os.path.join(out, "cell_segmentation_work"); os.makedirs(seg, exist_ok=True)
     tifffile.imwrite(os.path.join(seg, "mask_0.tiff"), masks)

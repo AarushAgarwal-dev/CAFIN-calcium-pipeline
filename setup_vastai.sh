@@ -19,18 +19,18 @@ MODE="${1:-gui}"
 
 echo "==> CAFIN vast.ai setup starting"
 
-# --- 1. Python deps (torch+CUDA is preinstalled in the PyTorch template) ------
+# --- 1. Python deps -----------------------------------------------------------
 echo "==> Installing Python dependencies..."
+python -c 'import sys; assert (3, 10) <= sys.version_info[:2] <= (3, 11), "CAFIN requires Python 3.10 or 3.11"'
 pip install --quiet --upgrade pip
-pip install --quiet \
-    streamlit cellpose opencv-python-headless scikit-image tifffile imageio \
-    pillow pandas scipy natsort matplotlib SimpleITK
+pip install --quiet --force-reinstall \
+    torch==2.2.2 torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+pip install --quiet -r requirements-gui.txt
 
-# --- 2. If torch has no CUDA, install a CUDA build ----------------------------
+# --- 2. Verify the selected CUDA build ----------------------------------------
 if ! python -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-    echo "==> No CUDA torch detected -> installing CUDA 12.4 build..."
-    pip install --quiet --force-reinstall torch --index-url https://download.pytorch.org/whl/cu124 || \
-        echo "!! CUDA torch install failed; will run on CPU."
+    echo "!! CUDA was not available after installation; CAFIN will run Cellpose on CPU."
 fi
 
 # --- 3. Report the GPU --------------------------------------------------------
@@ -43,11 +43,11 @@ else:
     print("   CUDA NOT available (running on CPU) | torch", torch.__version__)
 PY
 
-# --- 4. Warm the Cellpose model (downloads cpsam weights once) ----------------
+# --- 4. Warm the Cellpose cyto3 model (downloads weights once) ----------------
 echo "==> Downloading Cellpose model weights (first run only)..."
 python - <<'PY' || true
 from cellpose import models
-models.CellposeModel(gpu=__import__("torch").cuda.is_available())
+models.CellposeModel(model_type="cyto3", gpu=__import__("torch").cuda.is_available())
 print("   Cellpose model ready.")
 PY
 

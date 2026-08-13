@@ -3,10 +3,10 @@ CAFIN calcium-analysis pipeline  --  CORRECTED / RUNNABLE version
 =================================================================
 Fixes applied vs. the original notebook (CafinPaper1.ipynb):
 
-1.  cellpose 4.x (cpsam) API.  The notebook used CellposeDenoiseModel /
-    model_type="cyto3" / channels=[2,0], all removed in cellpose>=4.  This
-    crashed segmentation, so no mask was produced and every downstream
-    "result" was empty -> the numbers in the manuscript were not real.
+1.  Cellpose compatibility. The stable environment uses Cellpose 3.1's
+    ``cyto3`` model with channels=[2,0], matching the manuscript. The script
+    uses CAFIN's shared model builder so it remains compatible with Cellpose 4
+    if an existing environment already has it installed.
 2.  Rigid registration now also writes the calcium reference frame 0000
     (identity warp).  The original never saved it, so frame 0 (the delta F/F0
     baseline) was silently dropped everywhere downstream.
@@ -34,6 +34,10 @@ from skimage.measure import regionprops, label
 from scipy.signal import find_peaks
 
 warnings.filterwarnings("ignore")
+
+# NumPy 1.26 exposes ``trapz`` rather than the newer ``trapezoid`` alias.
+if not hasattr(np, "trapezoid"):
+    np.trapezoid = np.trapz
 
 # ------------------------------------------------------------------ CONFIG
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -171,22 +175,16 @@ def part_overlay(first_mem, overlay_pairs):
 
 # ============================================================ PART 2  SEGMENT
 def part2_segment():
-    print("\n=== PART 2: Cellpose segmentation (cellpose 4.x / cpsam) ===")
-    from cellpose import models
+    print("\n=== PART 2: Cellpose segmentation (cyto3 compatibility mode) ===")
+    from cafin_core import segment
     seg_dir = os.path.join(output_directory, "cell_segmentation_work")
     os.makedirs(seg_dir, exist_ok=True)
 
     raw_dir = os.path.join(output_directory, "rigid_raw_registered")
     img = io.imread(os.path.join(raw_dir, f"raw_registered_{membrane_base_name}0000.tif"))
-    img8 = stretch(img)   # cpsam likes normalized single-channel input
-
-    try:
-        import torch; _gpu = torch.cuda.is_available()
-    except Exception:
-        _gpu = False
-    model = models.CellposeModel(gpu=_gpu)          # FIX #1: cpsam; CUDA if available, else CPU
-    res = model.eval(img8, diameter=15, flow_threshold=0.4, cellprob_threshold=0.0)
-    masks = res[0]                                   # cellpose4 returns (masks, flows, styles)
+    img8 = stretch(img)
+    masks, used_gpu = segment(img, diameter=15, gpu=True, model_type="cyto3")
+    print(f"   Cellpose backend: {'GPU' if used_gpu else 'CPU'}")
 
     n = int(masks.max())
     print(f"   segmented {n} cells")

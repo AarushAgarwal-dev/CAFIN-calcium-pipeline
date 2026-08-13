@@ -1,7 +1,7 @@
 # Complete CAFIN environment: GUI, AI interpretation, paper generation, and reproduction.
 #
 # Python is installed separately, not through pip.
-# Required Python: 3.10 to 3.12 (3.11 recommended).
+# Required Python: 3.10 or 3.11 (3.11 recommended).
 # Install this file with: python -m pip install -r requirements.txt
 #
 # For a GPU-aware installation, prefer:
@@ -12,15 +12,19 @@ pip>=23
 setuptools>=68
 wheel>=0.41
 
-# Core scientific computing and plots
-numpy>=1.26,<3
+# Core scientific computing and plots. NumPy 1.26 is intentionally pinned for
+# ABI compatibility with the stable Cellpose 3 / PyTorch 2.2 environment.
+numpy==1.26.4
 pandas>=2.1,<3
 scipy>=1.11,<2
 matplotlib>=3.8,<4
 scikit-learn>=1.3,<2
 
-# Images and microscopy data
-opencv-python>=4.8,<5
+# Images and microscopy data. Install one OpenCV package only. The headless
+# build is sufficient because CAFIN renders through Streamlit. OpenCV 4.9 has
+# no Python 3.11 Intel-macOS wheel, so Intel Macs use 4.6.0.66 instead.
+opencv-python-headless==4.9.0.80; platform_system != "Darwin" or platform_machine != "x86_64"
+opencv-python==4.6.0.66; platform_system == "Darwin" and platform_machine == "x86_64"
 scikit-image>=0.22,<0.26
 tifffile>=2023.9
 imageio>=2.31,<3
@@ -30,16 +34,19 @@ pillow>=10,<13
 streamlit>=1.40,<2
 plotly>=5.18,<7
 
-# Segmentation, registration, and tracking
-# Generic PyTorch is CPU-compatible. install.py selects CUDA, DirectML, ROCm,
-# or Apple Silicon support when the hardware and operating system support it.
-torch>=2.2,<3
-cellpose>=3.1,<5
+# Segmentation, registration, and tracking. These are the verified CPU/MPS
+# pair for the manuscript's cyto3 model. install.py may select an equivalent
+# vendor wheel for CUDA, ROCm, or DirectML.
+torch==2.2.2
+torchvision==0.17.2
+numba==0.62.1
+llvmlite==0.45.1
+cellpose==3.1.1.3
 itk-elastix>=0.20,<1
 SimpleITK>=2.3,<3
 
 # Optional AI interpretation through Amazon Bedrock
-boto3>=1.34,<2
+boto3==1.43.70
 
 # Paper generation and reproducibility
-python-docx>=1.1,<2
+python-docx==1.2.0
