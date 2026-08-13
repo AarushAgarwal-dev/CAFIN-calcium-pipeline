@@ -572,6 +572,10 @@ if ok_data and n_frames:
 
 # =========================================================== RUN
 if run:
+    # GIFs are derived from the previous result set. Clear their in-memory download
+    # caches before a new analysis so no stale GIF can be mistaken for new results.
+    for _gif_cache_key in [k for k in ss if k.startswith("_gif_export_")]:
+        del ss[_gif_cache_key]
     n_use = n_frames if max_frames == 0 else min(max_frames, n_frames)
     prog = st.progress(0.0, text="Starting…")
     tstats = None
