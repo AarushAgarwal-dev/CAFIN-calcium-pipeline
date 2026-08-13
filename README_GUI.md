@@ -65,6 +65,9 @@ per-frame transform, so each cell is followed as it moves/deforms.
   "build GIF" button.
 - **Segmentation** – frame-0 membrane with numbered cell ROIs.
 - **Traces / ΔF/F0** – all per-cell traces + population mean, and a cells×frames heatmap.
+- **Clustering** – check whole traces and/or specific biological inputs before PCA + K-means: first-peak
+  time, peak count, amplitude, width, area, inter-peak timing, per-cell activity, and tissue coupling.
+  A separate tissue-state mode clusters frames from whole-field signal and active-cell fraction.
 - **Tracking** – tracked vs. static ROI position per frame (tracking modes only).
 - **Statistics** – metrics table + violin plots (amplitude / interval / area) +
   fraction-of-active-cells curve.

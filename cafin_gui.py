@@ -1075,22 +1075,152 @@ with T[TAB_TRC]:
 
 # ---------------------------------------------------------- Clustering
 def render_clustering(df, sfx):
-    st.subheader("Trace clustering (PCA → K-means)")
+    st.subheader("Clustering (PCA → K-means)")
     cells = [c for c in df.columns if c.startswith("Cell_")]
-    if len(cells) < 4:
-        st.info("Need at least 4 cells to cluster.")
+    if not cells:
+        st.info("No cell traces are available to cluster.")
     else:
+        target = st.radio("Cluster what?", ["Cells", "Tissue states (frames)"], horizontal=True,
+                          key="clu_target" + sfx,
+                          help="Cell clustering groups cells. Tissue-state clustering groups frames by "
+                               "the selected whole-field metrics.")
+        selected_cell_features, selected_tissue_features = [], []
+        include_trace, frame_interval, show_tissue_summary = False, 1.0, False
+        if target == "Cells":
+            if len(cells) < 4:
+                st.info("Need at least 4 cells for cell clustering. Tissue-state clustering is still available.")
+                return
+            st.markdown("**Choose the checked inputs used to cluster cells**")
+            st.caption("Whole traces preserve dynamic shape. Checked scalar features add biological "
+                       "measurements such as first-peak time or activity. Each checked family is "
+                       "balanced so a long trace does not drown out a one-value feature.")
+            include_trace = st.checkbox("Whole ΔF/F0i traces", value=True, key="clu_trace" + sfx,
+                                        help="Original PCA + K-means trace-shape clustering.")
+            peak_on = st.checkbox("Peak dynamics", value=False, key="clu_peak_on" + sfx,
+                                  help="Use checked per-cell peak measurements as clustering inputs.")
+            if peak_on:
+                st.caption("Cells without a first detected peak are placed at the end of the recording "
+                           "for that feature. Other missing peak-shape values are median-imputed; "
+                           "number of peaks retains the information that a cell was silent.")
+                frame_interval = st.number_input(
+                    "Frame interval for peak timing (minutes; use 1 for frames)", 0.001, 60.0, 1.0,
+                    step=0.1, key="clu_frame_interval" + sfx)
+                pcols = st.columns(3)
+                peak_keys = ["n_peaks", "t_first_peak", "auc", "amplitude", "fwhm", "dt_peak"]
+                for i, key in enumerate(peak_keys):
+                    if pcols[i % len(pcols)].checkbox(cc.CELL_CLUSTER_FEATURES[key],
+                                                       value=(key == "t_first_peak"),
+                                                       key="clu_feat_" + key + sfx):
+                        selected_cell_features.append(key)
+            activity_on = st.checkbox("Cell activity summary", value=False,
+                                      key="clu_activity_on" + sfx,
+                                      help="Use activity magnitude and recruitment per cell.")
+            if activity_on:
+                acols = st.columns(2)
+                for i, key in enumerate(["active_frame_fraction", "mean_dff0", "max_dff0", "t_max_dff0"]):
+                    if acols[i % len(acols)].checkbox(cc.CELL_CLUSTER_FEATURES[key], value=False,
+                                                       key="clu_feat_" + key + sfx):
+                        selected_cell_features.append(key)
+            coupling_on = st.checkbox("Cell-to-tissue coupling", value=False,
+                                      key="clu_coupling_on" + sfx,
+                                      help="Use how closely each cell follows the tissue-mean trace.")
+            if coupling_on:
+                key = "tissue_mean_correlation"
+                if st.checkbox(cc.CELL_CLUSTER_FEATURES[key], value=True,
+                               key="clu_feat_" + key + sfx):
+                    selected_cell_features.append(key)
+            show_tissue_summary = st.checkbox("Show tissue-level summary alongside cell clusters", value=False,
+                                               key="clu_show_tissue" + sfx,
+                                               help="Whole-tissue metrics have one value per field, so they are "
+                                                    "shown beside cell clusters rather than used to split cells.")
+            n_observations = len(cells)
+        else:
+            st.markdown("**Choose the checked tissue-level measurements used to cluster frames**")
+            st.caption("This is a time-state analysis: each point is an imaging frame, not a cell. "
+                       "It can identify quiet, recruitment, and high-activity tissue states.")
+            tissue_cols = st.columns(2)
+            for i, key in enumerate(cc.TISSUE_CLUSTER_FEATURES):
+                default = key in ("tissue_mean_dff0", "active_cell_fraction")
+                if tissue_cols[i % len(tissue_cols)].checkbox(cc.TISSUE_CLUSTER_FEATURES[key], value=default,
+                                                               key="clu_tissue_" + key + sfx):
+                    selected_tissue_features.append(key)
+            n_observations = len(df)
+
         cc1, cc2 = st.columns(2)
-        _pca_max = int(max(5, min(200, len(cells) - 1, len(frames))))
-        n_pca = cc1.slider("PCA features", 2, _pca_max, min(25, _pca_max), key="npca" + sfx,
-                           help=f"Capped at {_pca_max} by the number of cells and frames.")
-        k = cc2.slider("Number of clusters (k)", 2, int(max(2, min(30, len(cells)))), 4,
-                       key="nclu" + sfx)
-        cl = cc.cluster_traces(df, n_pca=n_pca, n_clusters=k)
+        _pca_max = int(max(1, min(200, max(1, n_observations - 1), len(frames))))
+        n_pca = cc1.slider("PCA components", 1, _pca_max, min(25, _pca_max), key="npca" + sfx,
+                           help="The selected inputs are reduced to this many components before K-means.")
+        _kmax = int(max(2, min(30, n_observations)))
+        k = cc2.slider("Number of clusters (k)", 2, _kmax, min(4, _kmax), key="nclu" + sfx)
+        try:
+            if target == "Cells":
+                cl = cc.cluster_cells(df, include_trace=include_trace,
+                                      selected_features=selected_cell_features, threshold=peak_thr,
+                                      frame_interval=frame_interval, n_pca=n_pca, n_clusters=k)
+            else:
+                cl = cc.cluster_tissue_states(df, selected_features=selected_tissue_features,
+                                              threshold=peak_thr, n_pca=n_pca, n_clusters=k)
+        except ValueError as exc:
+            st.warning(f"Clustering cannot run yet: {exc}")
+            return
         ids, labels, coords = cl["ids"], cl["labels"], cl["coords"]
-        st.caption(f"PCA kept {cl['n_pca_used']} components "
+        cluster_signature = (target, include_trace, tuple(selected_cell_features),
+                             tuple(selected_tissue_features), n_pca, k, peak_thr, frame_interval)
+        signature_key = "cluster_signature" + sfx
+        if ss.get(signature_key) != cluster_signature:
+            for stale in ("ai_story", "ai_story_full", "ai_err", "ai_chat", "ai_conn"):
+                ss.pop(stale + sfx, None)
+            ss[signature_key] = cluster_signature
+        if sfx.endswith("_all"):
+            # Do not leave a downloadable assignment table from a different
+            # clustering target visible after the researcher switches modes.
+            if target == "Cells":
+                ss.pop("tissue_cluster_df", None)
+            else:
+                ss.pop("cluster_df", None)
+        st.caption(f"Checked inputs used: **{', '.join(cl['feature_groups'])}**. PCA kept "
+                   f"{cl['n_pca_used']} component{'s' if cl['n_pca_used'] != 1 else ''} "
                    f"({cl['explained_var']*100:.0f}% variance) · {cl['k']} clusters.")
+        if cl["dropped_feature_groups"]:
+            st.info("Not used because there was no variation in this recording: "
+                    + ", ".join(cl["dropped_feature_groups"]) + ".")
         colors, cnames = cluster_palette(cl["k"])
+
+        if target == "Tissue states (frames)":
+            colL, colR = st.columns(2)
+            tissue_table = cl["feature_table"].copy()
+            tissue_table["tissue_state"] = labels
+            tissue_table = tissue_table[["Frame", "tissue_state"] +
+                                        [c for c in tissue_table if c not in ("Frame", "tissue_state")]]
+            with colL:
+                figt, axt = plt.subplots(figsize=(6, 4))
+                axt.plot(tissue_table["Frame"], tissue_table["tissue_mean_dff0"], color="0.65", lw=1,
+                         label="tissue mean ΔF/F0i")
+                for lab in range(cl["k"]):
+                    m = labels == lab
+                    axt.scatter(np.asarray(ids)[m], tissue_table.loc[m, "tissue_mean_dff0"], s=28,
+                                color=colors[lab] / 255, label=f"State {lab} (n={m.sum()})")
+                axt.set_xlabel("Frame"); axt.set_ylabel("tissue mean ΔF/F0i")
+                axt.grid(alpha=0.3); axt.legend(fontsize=8)
+                axt.set_title("Tissue activity states")
+                st.pyplot(figt)
+            with colR:
+                figp, axp = plt.subplots(figsize=(5.5, 4))
+                for lab in range(cl["k"]):
+                    m = labels == lab
+                    axp.scatter(coords[m, 0], coords[m, 1], s=18, alpha=0.8,
+                                color=colors[lab] / 255, label=f"State {lab} (n={m.sum()})")
+                axp.set_xlabel("PC1"); axp.set_ylabel("PC2")
+                axp.legend(fontsize=8); axp.grid(alpha=0.3)
+                st.pyplot(figp)
+            st.dataframe(tissue_table, width="stretch", height=280)
+            if sfx.endswith("_all"):
+                ss["tissue_cluster_df"] = tissue_table
+            st.download_button("⬇ tissue-state assignments (CSV)", tissue_table.to_csv(index=False).encode(),
+                               "tissue_state_assignments.csv", "text/csv", key="dltissueclu" + sfx)
+            st.caption("Tissue-state clustering does not color individual cells or run the cell-cluster AI story. "
+                       "Switch to **Cells** to group cells by the checked inputs.")
+            return
 
         colL, colR = st.columns(2)
         # cluster map on tissue
@@ -1124,10 +1254,28 @@ def render_clustering(df, sfx):
         st.pyplot(figc)
 
         cluster_df = pd.DataFrame({"cell_id": ids, "cluster": labels})
+        feature_columns = ["cell_id"] + [c for c in selected_cell_features
+                                          if c in cl["feature_table"].columns]
+        if len(feature_columns) > 1:
+            cluster_df = cluster_df.merge(cl["feature_table"][feature_columns], on="cell_id", how="left")
+        cluster_df["cluster_inputs"] = "; ".join(cl["feature_groups"])
         if sfx.endswith("_all"):
             ss["cluster_df"] = cluster_df      # the all-cell run feeds the Downloads tab
+        if selected_cell_features and st.checkbox("Show selected per-cell clustering features", False,
+                                                  key="clu_feature_table" + sfx):
+            st.dataframe(cluster_df, width="stretch", height=280)
         st.download_button("⬇ cluster assignments (CSV)", cluster_df.to_csv(index=False).encode(),
                            "cluster_assignments.csv", "text/csv", key="dlclu" + sfx)
+
+        if show_tissue_summary:
+            st.subheader("Tissue-level summary")
+            tissue_metrics, _ = cc.metrics(df, threshold=peak_thr)
+            st.dataframe(pd.DataFrame([tissue_metrics]).T.rename(columns={0: "value"}), width="stretch")
+            frac = (df[cells].to_numpy(float) > peak_thr).mean(axis=1)
+            figaf, axaf = plt.subplots(figsize=(11, 2.8))
+            axaf.plot(df["Frame"], frac, color="tab:purple", lw=1.8)
+            axaf.set_ylim(0, 1); axaf.set_xlabel("Frame"); axaf.set_ylabel("active-cell fraction")
+            axaf.grid(alpha=0.3); st.pyplot(figaf)
 
         # ---------- AI story from the clusters (Amazon Bedrock, open-source model) ----------
         st.divider()
@@ -1171,6 +1319,7 @@ def render_clustering(df, sfx):
                        n_frames=int(nfr), n_cells=int(len(ids)), n_clusters=int(cl["k"]),
                        pca_components=int(cl["n_pca_used"]),
                        pca_variance_explained=round(float(cl["explained_var"]), 2),
+                       clustering_inputs=cl["feature_groups"],
                        peak_threshold_dff0=float(peak_thr), image_size=list(mask0.shape),
                        clusters=clist)
         # ---- full per-cluster/population time-series across ALL frames (entire context) ----
@@ -1189,6 +1338,7 @@ def render_clustering(df, sfx):
                                            mean_trace_dff0=_ds(A2[:, sel].mean(1))))
         full_payload = dict(dataset=os.path.basename(trial.rstrip("/\\")), method=R.get("mode"),
                             n_frames=int(nfr), n_cells=int(len(ids)), n_clusters=int(cl["k"]),
+                            clustering_inputs=cl["feature_groups"],
                             peak_threshold_dff0=float(peak_thr),
                             frames_downsampled_to=min(nfr, 150),
                             population_mean_dff0=_ds(A2.mean(1)),
@@ -1477,6 +1627,9 @@ with T[TAB_DL]:
     if ss.get("cluster_df") is not None:
         _avail["Cluster assignments (cluster_assignments.csv)"] = ("cluster_assignments.csv", "csv",
                                                                    ss["cluster_df"])
+    if ss.get("tissue_cluster_df") is not None:
+        _avail["Tissue-state assignments (tissue_state_assignments.csv)"] = (
+            "tissue_state_assignments.csv", "csv", ss["tissue_cluster_df"])
     if R.get("link") and reg.get("mask_per_frame"):
         _avail["Tracked masks (tracked_masks.tiff)"] = ("tracked_masks.tiff", "stack", None)
     for _k, _lbl in (("ai_story", "AI findings — clusters (ai_findings_clusters.md)"),

@@ -681,27 +681,213 @@ def peak_features(dff_df, threshold=0.5, frame_interval=1.0, min_distance=2):
 
 
 # ============================================================ CLUSTERING
-def cluster_traces(dff_df, n_pca=25, n_clusters=4, seed=0):
-    """Cluster cells by the shape of their ΔF/F0 traces.
-    Standardize each cell's trace -> PCA to `n_pca` features -> KMeans(`n_clusters`).
-    Returns dict: ids, labels (per cell), coords (PCA), n_pca_used, explained_var.
+# The labels are deliberately public so the GUI, saved tables, and any scripts
+# use the same biologically readable names for cluster inputs.
+CELL_CLUSTER_FEATURES = {
+    "n_peaks": "Number of detected peaks",
+    "t_first_peak": "Time to first peak",
+    "auc": "Area under the trace",
+    "amplitude": "Mean peak amplitude",
+    "fwhm": "Mean peak width (FWHM)",
+    "dt_peak": "Mean time between peaks",
+    "active_frame_fraction": "Active-frame fraction",
+    "mean_dff0": "Mean ΔF/F0i",
+    "max_dff0": "Maximum ΔF/F0i",
+    "t_max_dff0": "Time to maximum ΔF/F0i",
+    "tissue_mean_correlation": "Correlation with tissue-mean trace",
+}
+
+TISSUE_CLUSTER_FEATURES = {
+    "tissue_mean_dff0": "Tissue mean ΔF/F0i",
+    "active_cell_fraction": "Active-cell fraction",
+    "tissue_median_dff0": "Tissue median ΔF/F0i",
+    "cell_to_cell_sd": "Cell-to-cell signal spread (SD)",
+}
+
+
+def cell_clustering_features(dff_df, threshold=0.5, frame_interval=1.0,
+                             min_distance=2):
+    """Return one clustering-ready feature row per cell.
+
+    Peak-dependent values remain NaN when a cell has no detected peak. The
+    clustering function handles those values explicitly: no first peak is
+    placed at the end of the recording and the other missing peak-shape values
+    are median-imputed after a separate ``n_peaks`` feature records silence.
+    """
+    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
+    ids = np.array([int(c.split("_")[1]) for c in cells])
+    A = np.nan_to_num(dff_df[cells].to_numpy(float), nan=0.0)
+    n_frames = len(A)
+    feats = peak_features(dff_df, threshold=threshold, frame_interval=frame_interval,
+                          min_distance=min_distance).set_index("cell")
+    table = feats.reindex(ids).reset_index().rename(columns={"cell": "cell_id"})
+    # A non-detected first peak means that the cell has not initiated within the
+    # recording. Treat it as after the last sampled frame rather than falsely
+    # treating it as frame zero.
+    end_time = float(max(0, n_frames) * frame_interval)
+    table["t_first_peak"] = table["t_first_peak"].fillna(end_time)
+    table["has_detected_peak"] = table["n_peaks"].gt(0)
+    table["active_frame_fraction"] = (A > threshold).mean(axis=0) if n_frames else 0.0
+    table["mean_dff0"] = A.mean(axis=0) if n_frames else 0.0
+    table["max_dff0"] = A.max(axis=0) if n_frames else 0.0
+    table["t_max_dff0"] = (A.argmax(axis=0) * frame_interval) if n_frames else 0.0
+
+    tissue_mean = A.mean(axis=1) if n_frames else np.array([])
+    correlations = []
+    for j in range(len(ids)):
+        if n_frames < 2 or np.std(A[:, j]) == 0 or np.std(tissue_mean) == 0:
+            correlations.append(np.nan)
+        else:
+            correlations.append(float(np.corrcoef(A[:, j], tissue_mean)[0, 1]))
+    table["tissue_mean_correlation"] = correlations
+    return table
+
+
+def tissue_clustering_features(dff_df, threshold=0.5):
+    """Return one tissue-state feature row per frame for frame clustering."""
+    cells = [c for c in dff_df.columns if c.startswith("Cell_")]
+    frames = (dff_df["Frame"].to_numpy() if "Frame" in dff_df.columns
+              else np.arange(len(dff_df)))
+    A = np.nan_to_num(dff_df[cells].to_numpy(float), nan=0.0)
+    if A.shape[1] == 0:
+        raise ValueError("No cell traces are available for tissue-state clustering.")
+    return pd.DataFrame({
+        "Frame": frames,
+        "tissue_mean_dff0": A.mean(axis=1),
+        "active_cell_fraction": (A > threshold).mean(axis=1),
+        "tissue_median_dff0": np.median(A, axis=1),
+        "cell_to_cell_sd": A.std(axis=1),
+    })
+
+
+def _impute_scale_group(values, names):
+    """Impute a feature family, z-score columns, then balance family weight.
+
+    Whole traces may contain hundreds of time points while first-peak time is
+    one value. Dividing a family's z-scored matrix by sqrt(number of columns)
+    prevents the trace family from automatically outweighing every selected
+    biological feature merely because it has more columns.
     """
     from sklearn.preprocessing import StandardScaler
+
+    X = np.asarray(values, dtype=float)
+    if X.ndim == 1:
+        X = X[:, None]
+    if X.ndim != 2 or X.shape[1] == 0:
+        return None, []
+    finite = np.isfinite(X)
+    medians = np.nanmedian(np.where(finite, X, np.nan), axis=0)
+    medians = np.where(np.isfinite(medians), medians, 0.0)
+    X = np.where(finite, X, medians[None, :])
+    varying = np.nanstd(X, axis=0) > 1e-12
+    if not np.any(varying):
+        return None, []
+    X = X[:, varying]
+    kept_names = [name for name, keep in zip(names, varying) if keep]
+    X = StandardScaler().fit_transform(X)
+    return X / np.sqrt(X.shape[1]), kept_names
+
+
+def _cluster_feature_groups(ids, groups, n_pca=25, n_clusters=4, seed=0):
+    """PCA + K-means for named, equally weighted feature families."""
     from sklearn.decomposition import PCA
     from sklearn.cluster import KMeans
 
+    ids = np.asarray(ids)
+    if len(ids) < 2:
+        raise ValueError("Need at least two observations to cluster.")
+    matrices, feature_names, group_names, dropped_groups = [], [], [], []
+    for group_name, values, names in groups:
+        scaled, kept = _impute_scale_group(values, names)
+        if scaled is not None:
+            matrices.append(scaled)
+            feature_names.extend(kept)
+            group_names.append(group_name)
+        else:
+            dropped_groups.append(group_name)
+    if not matrices:
+        raise ValueError("The selected clustering features do not vary across observations.")
+    X = np.column_stack(matrices)
+    n_comp = int(min(max(1, n_pca), X.shape[0] - 1, X.shape[1]))
+    pca = PCA(n_components=n_comp, random_state=seed)
+    scores = pca.fit_transform(X)
+    # Avoid empty K-means clusters when only a few feature rows are distinct.
+    distinct = np.unique(np.round(scores, decimals=12), axis=0).shape[0]
+    k = int(min(max(2, n_clusters), len(ids), distinct))
+    if k < 2:
+        raise ValueError("The selected clustering features contain only one unique state.")
+    labels = KMeans(n_clusters=k, n_init=20, random_state=seed).fit_predict(scores)
+    coords = np.zeros((len(ids), 2), dtype=float)
+    coords[:, :min(2, scores.shape[1])] = scores[:, :min(2, scores.shape[1])]
+    return {
+        "ids": ids,
+        "labels": labels,
+        "coords": coords,
+        "scores": scores,
+        "n_pca_used": n_comp,
+        "explained_var": float(pca.explained_variance_ratio_.sum()),
+        "k": k,
+        "feature_names": feature_names,
+        "feature_groups": group_names,
+        "dropped_feature_groups": dropped_groups,
+    }
+
+
+def cluster_cells(dff_df, include_trace=True, selected_features=None, threshold=0.5,
+                  frame_interval=1.0, n_pca=25, n_clusters=4, seed=0):
+    """Cluster cells using checked trace, peak, activity, and tissue-coupling inputs.
+
+    ``include_trace`` keeps the original whole-trace PCA workflow. Entries in
+    ``selected_features`` must be keys in :data:`CELL_CLUSTER_FEATURES`.
+    """
+    selected_features = list(selected_features or [])
+    unknown = set(selected_features) - set(CELL_CLUSTER_FEATURES)
+    if unknown:
+        raise ValueError(f"Unknown cell clustering features: {sorted(unknown)}")
     cells = [c for c in dff_df.columns if c.startswith("Cell_")]
     ids = np.array([int(c.split("_")[1]) for c in cells])
-    X = np.nan_to_num(dff_df[cells].to_numpy(float)).T          # cells x frames
-    # standardize each cell's trace (row) so clustering is by shape, not amplitude offset
-    Xs = StandardScaler().fit_transform(X)
-    n_comp = int(max(2, min(n_pca, Xs.shape[0] - 1, Xs.shape[1])))
-    pca = PCA(n_components=n_comp, random_state=seed)
-    coords = pca.fit_transform(Xs)
-    k = int(max(2, min(n_clusters, Xs.shape[0])))
-    labels = KMeans(n_clusters=k, n_init=10, random_state=seed).fit_predict(coords)
-    return {"ids": ids, "labels": labels, "coords": coords, "n_pca_used": n_comp,
-            "explained_var": float(pca.explained_variance_ratio_.sum()), "k": k}
+    if not include_trace and not selected_features:
+        raise ValueError("Select the whole trace or at least one biological feature.")
+    table = cell_clustering_features(dff_df, threshold=threshold,
+                                     frame_interval=frame_interval)
+    groups = []
+    if include_trace:
+        trace = np.nan_to_num(dff_df[cells].to_numpy(float), nan=0.0).T
+        frame_ids = (dff_df["Frame"].to_numpy() if "Frame" in dff_df.columns
+                     else np.arange(trace.shape[1]))
+        groups.append(("Whole ΔF/F0i trace", trace,
+                       [f"trace_frame_{frame}" for frame in frame_ids]))
+    for key in selected_features:
+        groups.append((CELL_CLUSTER_FEATURES[key], table[[key]].to_numpy(float), [key]))
+    out = _cluster_feature_groups(ids, groups, n_pca=n_pca, n_clusters=n_clusters, seed=seed)
+    out.update({"feature_table": table, "include_trace": bool(include_trace),
+                "selected_features": selected_features, "mode": "cells"})
+    return out
+
+
+def cluster_tissue_states(dff_df, selected_features=None, threshold=0.5,
+                          n_pca=25, n_clusters=4, seed=0):
+    """Cluster frames into tissue-level activity states using checked features."""
+    selected_features = list(selected_features or [])
+    unknown = set(selected_features) - set(TISSUE_CLUSTER_FEATURES)
+    if unknown:
+        raise ValueError(f"Unknown tissue clustering features: {sorted(unknown)}")
+    if not selected_features:
+        raise ValueError("Select at least one tissue-level feature.")
+    table = tissue_clustering_features(dff_df, threshold=threshold)
+    groups = [(TISSUE_CLUSTER_FEATURES[key], table[[key]].to_numpy(float), [key])
+              for key in selected_features]
+    out = _cluster_feature_groups(table["Frame"].to_numpy(), groups, n_pca=n_pca,
+                                  n_clusters=n_clusters, seed=seed)
+    out.update({"feature_table": table, "selected_features": selected_features,
+                "include_trace": False, "mode": "tissue_states"})
+    return out
+
+
+def cluster_traces(dff_df, n_pca=25, n_clusters=4, seed=0):
+    """Backward-compatible whole-trace cell clustering wrapper."""
+    return cluster_cells(dff_df, include_trace=True, selected_features=[], n_pca=n_pca,
+                         n_clusters=n_clusters, seed=seed)
 
 
 # ============================================================ METRICS

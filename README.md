@@ -69,9 +69,12 @@ The pipeline runs in eight steps.
 6. Cell tracking (optional). Every frame is segmented on its own, then cells are linked into stable
    IDs. Matching combines an IoU, size, and centroid score with Hungarian assignment, propagates
    forward and backward from a reference frame, and closes short gaps.
-7. Analysis. Per-cell metrics include peak ΔF/F0, transient rate, and per-frame area. Tissue metrics
-   include spatial heterogeneity (the coefficient of variation of peak amplitude) and temporal
-   synchronization (the mean pairwise correlation). It also computes correlation against inter-cell
+7. Analysis. Per-cell metrics include peak ΔF/F0, transient rate, and per-frame area. The Clustering
+   tab can group cells by whole traces, selected peak dynamics (including first-peak time), activity
+   features, or cell-to-tissue coupling. It can also cluster frames into tissue-level activity states
+   from tissue mean signal and active-cell fraction. Tissue metrics include spatial heterogeneity
+   (the coefficient of variation of peak amplitude) and temporal synchronization (the mean pairwise
+   correlation). It also computes correlation against inter-cell
    distance and how activity changes over the recording.
 8. Statistics. Normality is checked with Shapiro-Wilk. If both groups are normal it uses a Welch
    t-test, otherwise Mann-Whitney U. Effect sizes are reported as the rank-biserial correlation, and

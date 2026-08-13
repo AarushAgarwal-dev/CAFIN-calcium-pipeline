@@ -1,8 +1,9 @@
 """
 cafin_ai.py  --  Amazon Bedrock narration of the trace-clustering results.
 
-Given compact per-cluster statistics (computed by the GUI from the PCA + K-means
-clustering of per-cell ΔF/F0 traces), ask an open-source model on Amazon Bedrock to write
+Given compact per-cluster statistics (computed by the GUI from PCA + K-means
+clustering of whole per-cell ΔF/F0 traces and/or selected calcium features), ask an
+open-source model on Amazon Bedrock to write
 a rigorous "findings" narrative — characterising each cluster's dynamics and spatial
 location, contrasting them, and proposing testable biological interpretations.
 
@@ -80,8 +81,9 @@ MODEL_CHOICES = [
 SYSTEM_PROMPT = (
     "You are a quantitative cell biologist analysing single-cell calcium (Ca2+) imaging of the "
     "zebrafish larval fin epithelium. You are given optional researcher-provided background about the "
-    "experiment (drug, concentration, treatment, imaging protocol) and per-cluster summary statistics "
-    "from an unsupervised clustering (PCA + K-means) of per-cell ΔF/F0 traces. Write a concise, "
+    "experiment (drug, concentration, treatment, imaging protocol), the checked clustering inputs, and "
+    "per-cluster summary statistics from an unsupervised PCA + K-means analysis of per-cell calcium "
+    "measurements. Write a concise, "
     "rigorous 'Findings' narrative that:\n"
     "1. Characterises each cluster by its dynamics — amplitude (mean peak ΔF/F0), transient "
     "frequency, temporal trend (early vs late activity), and within-cluster synchrony — and by its "
@@ -189,8 +191,9 @@ def interpret_clusters(payload: dict, model_id: str = DEFAULT_MODEL,
 # ------------------------------------------------------------------ follow-up chat
 CHAT_SYSTEM = (
     "You are a quantitative cell biologist helping a researcher interpret single-cell calcium "
-    "(Ca2+) imaging of the zebrafish larval fin epithelium. The researcher clustered per-cell "
-    "ΔF/F0 traces with PCA + K-means. You are given the cluster statistics (and, when available, "
+    "(Ca2+) imaging of the zebrafish larval fin epithelium. The researcher clustered per-cell calcium "
+    "measurements with PCA + K-means, using whole traces and/or checked peak and activity features. "
+    "You are given the cluster statistics (and, when available, "
     "the per-cluster time-series across all frames) plus any background the researcher supplied.\n\n"
     "Answer their questions directly and quantitatively. Ground every numeric claim ONLY in the "
     "data given; never invent values. When asked about initiators versus followers, reason from "
