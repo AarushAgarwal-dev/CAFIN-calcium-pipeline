@@ -927,3 +927,359 @@ def metrics(dff_df, threshold=0.5):
         "spatial_heterogeneity_cv": round(het, 3),
         "temporal_sync_r": round(sync, 3),
     }, {"amps": amps, "intervals": intervals, "areas": areas}
+
+
+# ============================================================ NETWORK ANALYSIS
+def analyze_calcium_network(
+    reg_or_ca,
+    mask0=None,
+    frames=None,
+    bg_boxes=None,
+    do_bg=False,
+    roi_box=None,
+    n_samples=250,
+    seed=0,
+    tissue_r_thresh=0.30,
+    r2_thresh=0.70,
+    positive_edges_only=False,
+    k_clique=6,
+    restrict_to_mask=True,
+    dataset_name="",
+):
+    """Pixel-level correlation network analysis with k-clique community detection.
+
+    Based on FocalPlane NetworkX calcium workflow:
+    1. Extracts pixel traces from background-corrected registered calcium frames.
+    2. Restricts sampled pixels to valid tissue mask (and ROI box if provided).
+    3. Samples pixels randomly with reproducible seed (default 250, max 1000).
+    4. Computes correlation of each pixel with tissue-average trace; filters by threshold.
+    5. Computes pairwise Pearson correlation and R² edge matrix between retained pixels.
+    6. Builds NetworkX graph with multi-factor safety preflight checks.
+    7. Detects k-clique percolation communities and tracks overlapping node memberships.
+
+    Returns dict with nodes_df, edges_df, summary_df, graph, and network metrics.
+    """
+    import networkx as nx
+    from networkx.algorithms.community import k_clique_communities
+
+    # 1. Resolve calcium frames source
+    if isinstance(reg_or_ca, dict) and "reg_ca" in reg_or_ca:
+        frames_list = frames or reg_or_ca.get("frames", sorted(reg_or_ca["reg_ca"].keys()))
+        ca_source = {i: reg_or_ca["reg_ca"][i] for i in frames_list if i in reg_or_ca["reg_ca"]}
+    elif isinstance(reg_or_ca, dict):
+        ca_source = dict(reg_or_ca)
+        frames_list = frames or sorted(ca_source.keys())
+    elif isinstance(reg_or_ca, np.ndarray):
+        if reg_or_ca.ndim == 3:
+            frames_list = frames or list(range(len(reg_or_ca)))
+            ca_source = {i: reg_or_ca[i] for i in range(len(reg_or_ca))}
+        else:
+            return {"error": "Calcium array must be 3D (T, H, W).", "safety": False}
+    else:
+        return {"error": "Invalid calcium data provided.", "safety": False}
+
+    if not ca_source or not frames_list:
+        return {"error": "No calcium frames available for network analysis.", "safety": False}
+
+    # 2. Background correction if enabled
+    if do_bg or bg_boxes is not None:
+        first_img = next((img for img in ca_source.values() if img is not None), None)
+        if first_img is not None:
+            if bg_boxes is None:
+                bg_boxes = auto_bg_boxes(first_img)
+            ca_source = bg_subtract(ca_source, bg_boxes)
+
+    # 3. Stack frames
+    valid_frames = [f for f in frames_list if f in ca_source and ca_source[f] is not None]
+    if len(valid_frames) < 2:
+        return {"error": "Need at least 2 frames for correlation network analysis.", "safety": False}
+
+    stack = np.stack([ca_source[f].astype(np.float32) for f in valid_frames], axis=0)
+    T, H, W = stack.shape
+
+    # 4. Determine valid pixel mask
+    if mask0 is not None:
+        m0 = np.asarray(mask0)
+        if m0.shape != (H, W):
+            m0 = cv2.resize(m0, (W, H), interpolation=cv2.INTER_NEAREST)
+        valid = (m0 > 0) if restrict_to_mask else np.ones((H, W), dtype=bool)
+    else:
+        valid = np.ones((H, W), dtype=bool)
+
+    if roi_box is not None:
+        x1, y1, x2, y2 = [int(v) for v in roi_box]
+        x1, x2 = sorted((max(0, x1), min(W, x2)))
+        y1, y2 = sorted((max(0, y1), min(H, y2)))
+        roi_mask = np.zeros((H, W), dtype=bool)
+        if x2 > x1 and y2 > y1:
+            roi_mask[y1:y2, x1:x2] = True
+        valid = valid & roi_mask
+
+    valid_yx = np.argwhere(valid)
+    n_valid = len(valid_yx)
+
+    if n_valid < k_clique:
+        return {
+            "error": f"Fewer than {k_clique} valid pixels found in selected region ({n_valid} available).",
+            "safety": False,
+            "n_valid_pixels": n_valid,
+        }
+
+    # 5. Compute tissue-average trace across all valid tissue/ROI pixels
+    tissue_mean = np.nanmean(stack[:, valid], axis=1)  # shape (T,)
+    tissue_std = float(np.nanstd(tissue_mean))
+    if np.isnan(tissue_std) or tissue_std <= 1e-12:
+        return {"error": "Tissue-average trace has zero variance; cannot compute correlations.", "safety": False}
+
+    # 6. Sample pixels with reproducible seed (default 250, capped at 1000)
+    n_samples_effective = int(min(max(1, n_samples), 1000, n_valid))
+    rng = np.random.default_rng(seed)
+    sampled_idx = rng.choice(n_valid, size=n_samples_effective, replace=False)
+    sampled_yx = valid_yx[sampled_idx]  # shape (N, 2)
+
+    # 7. Extract pixel traces and filter by tissue correlation
+    # traces: shape (N, T)
+    traces = stack[:, sampled_yx[:, 0], sampled_yx[:, 1]].T
+    tissue_r = np.zeros(n_samples_effective, dtype=np.float32)
+
+    for i in range(n_samples_effective):
+        tr = traces[i]
+        tr_std = float(np.std(tr))
+        if tr_std <= 1e-12 or np.isnan(tr_std):
+            tissue_r[i] = np.nan
+        else:
+            tissue_r[i] = float(np.corrcoef(tr, tissue_mean)[0, 1])
+
+    # Tissue correlation filter (positive threshold by default)
+    if float(tissue_r_thresh) > 0:
+        keep_mask = (tissue_r >= float(tissue_r_thresh)) & (tissue_r > 0) & np.isfinite(tissue_r)
+    else:
+        keep_mask = (tissue_r >= float(tissue_r_thresh)) & np.isfinite(tissue_r)
+    retained_indices = np.where(keep_mask)[0]
+    n_retained = len(retained_indices)
+
+    if n_retained < k_clique:
+        return {
+            "error": (
+                f"Only {n_retained} pixel(s) passed the positive tissue-correlation threshold "
+                f"(r ≥ {tissue_r_thresh:.2f}), but k-clique requires at least {k_clique} nodes."
+            ),
+            "safety": False,
+            "n_valid_pixels": n_valid,
+            "n_sampled": n_samples_effective,
+            "n_retained": n_retained,
+            "sampled_yx": sampled_yx,
+            "tissue_r": tissue_r,
+        }
+
+    # 8. Pairwise Pearson correlation and R² calculation
+    retained_yx = sampled_yx[retained_indices]
+    retained_traces = traces[retained_indices]  # (n_retained, T)
+    retained_tissue_r = tissue_r[retained_indices]
+
+    means = np.mean(retained_traces, axis=1, keepdims=True)
+    stds = np.std(retained_traces, axis=1, keepdims=True)
+    stds = np.maximum(stds, 1e-12)
+    Z = (retained_traces - means) / stds
+    C = (Z @ Z.T) / float(T)
+    np.clip(C, -1.0, 1.0, out=C)
+    R2 = C ** 2
+    np.fill_diagonal(C, 1.0)
+    np.fill_diagonal(R2, 1.0)
+
+    # Edge filtering
+    r2_thresh_val = float(r2_thresh)
+    if positive_edges_only:
+        edge_mask = (R2 >= r2_thresh_val) & (C > 0)
+    else:
+        edge_mask = (R2 >= r2_thresh_val)
+    np.fill_diagonal(edge_mask, False)
+
+    iu = np.triu_indices(n_retained, k=1)
+    edge_pairs = [(int(i), int(j)) for i, j in zip(iu[0], iu[1]) if edge_mask[i, j]]
+    n_edges = len(edge_pairs)
+
+    density = float((2.0 * n_edges) / (n_retained * (n_retained - 1))) if n_retained > 1 else 0.0
+    mean_degree = float((2.0 * n_edges) / float(n_retained)) if n_retained > 0 else 0.0
+
+    # 9. Multi-factor safety preflight check
+    if k_clique > n_retained:
+        return {
+            "error": f"k-clique size ({k_clique}) is larger than the number of retained nodes ({n_retained}).",
+            "safety": True,
+            "n_retained": n_retained,
+            "n_edges": n_edges,
+            "density": density,
+        }
+    if n_edges > 50000:
+        return {
+            "error": (
+                f"Graph is too dense ({n_edges:,} edges > 50,000 limit). "
+                f"Increase the Pearson R² threshold or reduce sample size."
+            ),
+            "safety": True,
+            "n_retained": n_retained,
+            "n_edges": n_edges,
+            "density": density,
+        }
+    if density > 0.85 and n_retained >= 20:
+        return {
+            "error": (
+                f"Graph density ({density:.2f}) is too high for k-clique community detection. "
+                f"Increase the Pearson R² threshold or reduce sample size."
+            ),
+            "safety": True,
+            "n_retained": n_retained,
+            "n_edges": n_edges,
+            "density": density,
+        }
+    if mean_degree > (0.70 * n_retained) and n_retained >= 25:
+        return {
+            "error": (
+                f"Mean node degree ({mean_degree:.1f}) is too high for k-clique community detection. "
+                f"Increase the Pearson R² threshold or reduce sample size."
+            ),
+            "safety": True,
+            "n_retained": n_retained,
+            "n_edges": n_edges,
+            "density": density,
+        }
+
+    # 10. Build NetworkX graph
+    G = nx.Graph()
+    for idx in range(n_retained):
+        G.add_node(
+            idx,
+            y=int(retained_yx[idx, 0]),
+            x=int(retained_yx[idx, 1]),
+            tissue_r=float(retained_tissue_r[idx]),
+        )
+    for i, j in edge_pairs:
+        G.add_edge(i, j, weight=float(R2[i, j]), r=float(C[i, j]), r2=float(R2[i, j]))
+
+    degrees = [int(G.degree[i]) for i in range(n_retained)]
+    max_deg = max(degrees) if degrees else 0
+    n_components = int(nx.number_connected_components(G)) if n_retained > 0 else 0
+
+    # Clique estimate safety check based on max node degree
+    if max_deg >= 22 and k_clique >= 4:
+        import math
+        try:
+            est_cliques = math.comb(min(max_deg, 30), min(int(k_clique), 10))
+        except Exception:
+            est_cliques = 100000
+        if est_cliques > 15000:
+            return {
+                "error": (
+                    f"Local node connectivity (max degree {max_deg}) produces too many potential cliques (~{est_cliques:,}). "
+                    f"Increase the Pearson R² threshold or reduce sample size."
+                ),
+                "safety": True,
+                "n_retained": n_retained,
+                "n_edges": n_edges,
+                "density": density,
+            }
+
+    # 11. k-clique community detection
+    try:
+        raw_communities = list(k_clique_communities(G, k=int(k_clique)))
+    except Exception:
+        raw_communities = []
+
+    # Sort communities by size descending
+    raw_communities.sort(key=lambda s: len(s), reverse=True)
+    n_communities = len(raw_communities)
+
+    # 12. Map nodes to communities (tracking overlapping membership)
+    node_community_lists = []
+    primary_communities = []
+    overlap_counts = []
+
+    for i in range(n_retained):
+        c_ids = [c for c, comm in enumerate(raw_communities) if i in comm]
+        node_community_lists.append(c_ids)
+        primary_communities.append(c_ids[0] if c_ids else -1)
+        overlap_counts.append(len(c_ids))
+
+    n_overlapping = sum(1 for cnt in overlap_counts if cnt > 1)
+    n_assigned = sum(1 for cnt in overlap_counts if cnt >= 1)
+    n_unassigned = sum(1 for cnt in overlap_counts if cnt == 0)
+
+    # 13. Construct output DataFrames
+    nodes_df = pd.DataFrame({
+        "node_id": list(range(n_retained)),
+        "y": retained_yx[:, 0].astype(int),
+        "x": retained_yx[:, 1].astype(int),
+        "tissue_r": np.round(retained_tissue_r, 4),
+        "degree": degrees,
+        "community_ids": [";".join(str(c) for c in c_ids) if c_ids else "None" for c_ids in node_community_lists],
+        "primary_community": primary_communities,
+        "overlap_count": overlap_counts,
+    })
+
+    if edge_pairs:
+        edges_df = pd.DataFrame({
+            "node_i": [p[0] for p in edge_pairs],
+            "node_j": [p[1] for p in edge_pairs],
+            "source_y": [int(retained_yx[p[0], 0]) for p in edge_pairs],
+            "source_x": [int(retained_yx[p[0], 1]) for p in edge_pairs],
+            "target_y": [int(retained_yx[p[1], 0]) for p in edge_pairs],
+            "target_x": [int(retained_yx[p[1], 1]) for p in edge_pairs],
+            "pearson_r": [round(float(C[p[0], p[1]]), 4) for p in edge_pairs],
+            "r_squared": [round(float(R2[p[0], p[1]]), 4) for p in edge_pairs],
+        })
+    else:
+        edges_df = pd.DataFrame(
+            columns=["node_i", "node_j", "source_y", "source_x", "target_y", "target_x", "pearson_r", "r_squared"]
+        )
+
+    summary_rows = [
+        ("Dataset", str(dataset_name)),
+        ("ROI active", bool(roi_box is not None)),
+        ("ROI box", str(roi_box) if roi_box else "None"),
+        ("Random seed", int(seed)),
+        ("Sampled pixels", int(n_samples_effective)),
+        ("Valid tissue pixels", int(n_valid)),
+        ("Retained nodes after tissue filter", int(n_retained)),
+        ("Network edges", int(n_edges)),
+        ("Graph density", round(float(density), 4)),
+        ("Mean degree", round(float(mean_degree), 2)),
+        ("Connected components", int(n_components)),
+        ("k-clique size", int(k_clique)),
+        ("Number of communities", int(n_communities)),
+        ("Assigned nodes", int(n_assigned)),
+        ("Unassigned nodes", int(n_unassigned)),
+        ("Overlapping nodes", int(n_overlapping)),
+        ("Tissue correlation threshold", float(tissue_r_thresh)),
+        ("Pearson R² threshold", float(r2_thresh)),
+        ("Positive edges only", bool(positive_edges_only)),
+        ("Restrict to segmented tissue", bool(restrict_to_mask)),
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["parameter", "value"])
+
+    return {
+        "nodes_df": nodes_df,
+        "edges_df": edges_df,
+        "summary_df": summary_df,
+        "graph": G,
+        "n_valid_pixels": n_valid,
+        "n_sampled": n_samples_effective,
+        "n_retained": n_retained,
+        "n_nodes": n_retained,
+        "n_edges": n_edges,
+        "density": density,
+        "mean_degree": mean_degree,
+        "n_components": n_components,
+        "n_communities": n_communities,
+        "n_assigned": n_assigned,
+        "n_unassigned": n_unassigned,
+        "n_overlapping": n_overlapping,
+        "k_clique": k_clique,
+        "communities": raw_communities,
+        "sampled_yx": sampled_yx,
+        "retained_yx": retained_yx,
+        "tissue_r": retained_tissue_r,
+        "all_sampled_tissue_r": tissue_r,
+        "safety_triggered": False,
+        "error": None,
+    }

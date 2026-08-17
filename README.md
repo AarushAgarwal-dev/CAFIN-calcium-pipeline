@@ -52,7 +52,7 @@ blocks the first launch.
 
 ## How it works
 
-The pipeline runs in eight steps.
+The pipeline runs in nine steps.
 
 1. Registration. Corrects tissue motion in the time-lapse. Rigid alignment uses OpenCV ECC;
    non-rigid alignment uses itk-elastix B-spline. Registration is computed on the membrane channel
@@ -76,7 +76,15 @@ The pipeline runs in eight steps.
    (the coefficient of variation of peak amplitude) and temporal synchronization (the mean pairwise
    correlation). It also computes correlation against inter-cell
    distance and how activity changes over the recording.
-8. Statistics. Normality is checked with Shapiro-Wilk. If both groups are normal it uses a Welch
+8. Network analysis. Pixel-level functional correlation network construction based on NetworkX.
+   Pixels are sampled with a reproducible seed (default 250, up to 1,000) from background-corrected
+   calcium frames, filtered by positive Pearson correlation with the tissue-average signal (default r ≥ 0.30),
+   and linked into network edges using Pearson R² (two-tailed by default to capture both strong positive
+   and negative correlations, with an optional positive-only edge filter). Communities are detected
+   via k-clique percolation (default k=6) with overlapping-node tracking and multi-factor safety
+   preflight guards against dense graph stalls. Exports include `network_nodes.csv`, `network_edges.csv`,
+   and `network_summary.csv`.
+9. Statistics. Normality is checked with Shapiro-Wilk. If both groups are normal it uses a Welch
    t-test, otherwise Mann-Whitney U. Effect sizes are reported as the rank-biserial correlation, and
    regional comparisons use Kruskal-Wallis.
 
@@ -88,8 +96,6 @@ If you would rather not use a terminal, double-click `install_windows.bat` on Wi
 `install.py` creates a local `.venv` by default, so it does not alter your normal Python packages.
 It installs Cellpose 3.1.1.3, NumPy 1.26.4, and the matching PyTorch 2.2.2 environment used by
 the manuscript workflow rather than allowing a later Cellpose or NumPy release to change results.
-Use `--launch` to open the GUI, `--cpu` to skip GPU builds, `--with-ai` for Amazon Bedrock, or
-`--with-paper` for manuscript generation. `--no-venv` is available for advanced users.
 
 To install everything manually into an existing Python environment, use
 `python -m pip install -r requirements.txt`. This includes the GUI, Amazon Bedrock support,
@@ -136,6 +142,7 @@ The three methods are:
 * Elastic (itk-elastix): non-rigid B-spline correction, at fast, balanced, or accurate quality.
 * Cell tracking: segments every frame and links cells into stable IDs, without registration.
 
+
 The tabs cover the registration overlay with frame playback, segmentation, ROI drawing, per-cell
 traces and a heatmap, PCA plus K-means clustering, tracking, statistics, and CSV or GIF export.
 Every playback view has a **Prepare GIF** button, which builds a downloadable loop from the same
@@ -175,13 +182,14 @@ output as a hypothesis rather than a result.
 ## Layout
 
 ```
-cafin_core.py        registration (ECC, itk-elastix), segmentation, background, ΔF/F0, ROI, clustering
+cafin_core.py        registration (ECC, itk-elastix), segmentation, background, ΔF/F0, ROI, clustering, NetworkX network analysis
 cafin_track.py       cell tracking: per-frame segmentation linked by Hungarian matching and gap closing
 cafin_pipeline.py    scripted end-to-end pipeline (no GUI)
 cafin_gui.py         Streamlit application
 cafin_ai.py          Amazon Bedrock (open-source models) narration of clustering results
 demo_data.py         creates the synthetic first-run example
 preflight.py         checks packages, GPU fallback, and trial-folder structure
+tests/               unit test suite (test_network_analysis.py)
 requirements-*.txt  GUI plus optional AI and paper dependency groups
 REPRODUCE/           scripts, results, figures, and the generated paper
   run_all.py             recompute, analyse, build figures, build paper

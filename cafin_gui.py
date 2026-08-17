@@ -678,8 +678,9 @@ if dff_roi is not None:
 
 TAB_REG, TAB_SEG, TAB_ROI = "🎞 Registration", "🧫 Segmentation", "🎯 ROI"
 TAB_TRC, TAB_CLU, TAB_STA = "📈 Traces / ΔF/F0i", "🧩 Clustering", "📊 Statistics"
+TAB_NET = "🕸 Network Analysis"
 TAB_TRK, TAB_DL = "🎯 Tracking", "⬇ Downloads"
-_names = [TAB_REG, TAB_SEG, TAB_ROI, TAB_TRC, TAB_STA, TAB_CLU]
+_names = [TAB_REG, TAB_SEG, TAB_ROI, TAB_TRC, TAB_STA, TAB_CLU, TAB_NET]
 if R["handling"] == "tracking":                    # only present when tracking was used
     _names.append(TAB_TRK)
 _names.append(TAB_DL)
@@ -1594,6 +1595,296 @@ def render_stats(df, sfx):
 with T[TAB_STA]:
     roi_split(render_stats, "sta")
 
+# ---------------------------------------------------------- Network Analysis
+def render_network(df, sfx):
+    is_roi = "roi" in sfx and R.get("roi_box") is not None
+    curr_roi_box = R.get("roi_box") if is_roi else None
+
+    st.subheader("Network analysis (pixel correlations & k-clique communities)")
+    st.caption(
+        "Builds a pixel-level correlation network on registered calcium frames, filters nodes by "
+        "positive correlation with the tissue-average signal, and detects k-clique percolation communities."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    n_samples = c1.number_input(
+        "Sampled pixels",
+        min_value=50,
+        max_value=1000,
+        value=250,
+        step=50,
+        key="net_samples" + sfx,
+        help="Number of pixels randomly sampled within the tissue mask (default 250, capped at 1,000 for responsive community detection).",
+    )
+    seed = c2.number_input(
+        "Random seed",
+        min_value=0,
+        max_value=999999,
+        value=0,
+        step=1,
+        key="net_seed" + sfx,
+        help="Reproducible random seed for pixel sampling.",
+    )
+    k_clique = c3.number_input(
+        "k-clique size (k)",
+        min_value=3,
+        max_value=15,
+        value=6,
+        step=1,
+        key="net_k" + sfx,
+        help="Minimum clique size for community percolation (default k=6).",
+    )
+
+    c4, c5 = st.columns(2)
+    tissue_r_thresh = c4.slider(
+        "Tissue-correlation threshold (positive direction)",
+        min_value=0.00,
+        max_value=0.90,
+        value=0.30,
+        step=0.05,
+        key="net_tissue_r" + sfx,
+        help="Only pixels whose calcium trace correlates positively with the tissue-average signal above this Pearson r are retained as network nodes.",
+    )
+    r2_thresh = c5.slider(
+        "Pearson R² edge threshold",
+        min_value=0.30,
+        max_value=1.00,
+        value=0.70,
+        step=0.05,
+        key="net_r2" + sfx,
+        help="Pearson R² ≥ 0.70 corresponds to |Pearson r| ≥ 0.837. Edges connect pairs with R² at or above this threshold.",
+    )
+
+    c6, c7 = st.columns(2)
+    restrict_mask = c6.checkbox(
+        "Restrict to segmented tissue",
+        value=True,
+        key="net_mask" + sfx,
+        help="Sample pixels only inside segmented cell/tissue regions.",
+    )
+    pos_edges = c7.checkbox(
+        "Positive-only network edges",
+        value=False,
+        key="net_pos_edge" + sfx,
+        help="When unchecked (default), high-R² edges include both strongly correlated and strongly anti-correlated pixel pairs, reproducing the referenced FocalPlane/NetworkX R² workflow. Check this to restrict edges to positively correlated signals.",
+    )
+
+    if not pos_edges:
+        st.caption(
+            "ℹ️ *Note: With positive-only network edges disabled (default), Pearson R² includes both strong positive (r ≥ +0.837) and strong negative (r ≤ -0.837) correlations.*"
+        )
+
+    # Parameter caching key
+    dataset_name = os.path.basename(trial.rstrip("/\\")) if "trial" in locals() and trial else ""
+    param_key = (
+        dataset_name,
+        tuple(curr_roi_box) if curr_roi_box else None,
+        int(seed),
+        int(n_samples),
+        float(tissue_r_thresh),
+        float(r2_thresh),
+        bool(pos_edges),
+        int(k_clique),
+        bool(restrict_mask),
+    )
+    cache_state_key = "_net_cache_" + sfx
+    result_state_key = "_net_result_" + sfx
+
+    if st.button("🕸 Build network", type="primary", key="btn_net" + sfx):
+        with st.spinner("Computing pixel correlations and k-clique communities…"):
+            _bg_bxs = cc.auto_bg_boxes(reg["reg_ca"][frames[0]]) if R.get("do_bg") else None
+            res = cc.analyze_calcium_network(
+                reg_or_ca=reg,
+                mask0=mask0,
+                frames=frames,
+                bg_boxes=_bg_bxs,
+                do_bg=R.get("do_bg", False),
+                roi_box=curr_roi_box,
+                n_samples=int(n_samples),
+                seed=int(seed),
+                tissue_r_thresh=float(tissue_r_thresh),
+                r2_thresh=float(r2_thresh),
+                positive_edges_only=bool(pos_edges),
+                k_clique=int(k_clique),
+                restrict_to_mask=bool(restrict_mask),
+                dataset_name=dataset_name,
+            )
+            ss[result_state_key] = res
+            ss[cache_state_key] = param_key
+            st.rerun()
+
+    net_res = ss.get(result_state_key)
+    if net_res is None:
+        st.info("Click **🕸 Build network** above to compute pixel correlations and k-clique communities.")
+        return
+
+    if net_res.get("error"):
+        if net_res.get("safety"):
+            st.error(f"⚠️ **Safety Preflight Guard:** {net_res['error']}")
+        else:
+            st.warning(f"⚠️ **Network Analysis Notice:** {net_res['error']}")
+        return
+
+    # Metric summary row
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    m1.metric("Retained Nodes", net_res["n_nodes"])
+    m2.metric("Edges", net_res["n_edges"])
+    m3.metric("Density", f"{net_res['density']:.3f}")
+    m4.metric("Mean Degree", f"{net_res['mean_degree']:.1f}")
+    m5.metric("Components", net_res["n_components"])
+    m6.metric("Communities", net_res["n_communities"])
+    m7.metric("Overlapping", net_res["n_overlapping"])
+
+    if net_res["n_communities"] == 0:
+        st.info(
+            f"No k-clique communities were detected with the current settings (k={k_clique}, R²≥{r2_thresh:.2f}). "
+            "Try lowering the R² threshold or k-clique size."
+        )
+
+    # Spatial Network Map
+    st.subheader("Spatial community map")
+    sc1, sc2 = st.columns([1, 2])
+    show_edges = sc1.checkbox("Draw edges on map", value=False, key="net_show_edges" + sfx)
+    edge_alpha = sc2.slider("Edge opacity", 0.05, 1.0, 0.25, 0.05, key="net_edge_alpha" + sfx) if show_edges else 0.25
+
+    ref_img = reg["reg_ca"].get(frames[0], next(iter(reg["reg_ca"].values())))
+    H, W = ref_img.shape
+    fig, ax = plt.subplots(figsize=(8, max(4, int(8 * H / max(W, 1)))), dpi=120)
+    ax.imshow(cc.stretch8(ref_img, clahe=True), cmap="gray")
+
+    if curr_roi_box:
+        x1, y1, x2, y2 = curr_roi_box
+        ax.plot([x1, x2, x2, x1, x1], [y1, y1, y2, y2, y1], color="yellow", lw=1.5, ls="--", label="ROI box")
+
+    if show_edges and net_res["n_edges"] > 0 and len(net_res["edges_df"]) > 0:
+        edf = net_res["edges_df"]
+        for _, erow in edf.iterrows():
+            ax.plot(
+                [erow["source_x"], erow["target_x"]],
+                [erow["source_y"], erow["target_y"]],
+                color="cyan",
+                alpha=float(edge_alpha),
+                lw=0.75,
+            )
+
+    K = net_res["n_communities"]
+    cols, cnames = cluster_palette(max(K, 1))
+
+    # Plot unassigned nodes
+    unassigned = net_res["nodes_df"][net_res["nodes_df"]["primary_community"] == -1]
+    if len(unassigned) > 0:
+        ax.scatter(
+            unassigned["x"],
+            unassigned["y"],
+            c="gray",
+            s=28,
+            alpha=0.6,
+            label=f"Unassigned ({len(unassigned)})",
+            edgecolors="none",
+            zorder=2,
+        )
+
+    # Plot community nodes
+    for c in range(K):
+        single = net_res["nodes_df"][
+            (net_res["nodes_df"]["primary_community"] == c) & (net_res["nodes_df"]["overlap_count"] == 1)
+        ]
+        if len(single) > 0:
+            ax.scatter(
+                single["x"],
+                single["y"],
+                color=[cols[c] / 255.0],
+                s=36,
+                alpha=0.85,
+                label=f"Community {c} ({len(single)})",
+                edgecolors="none",
+                zorder=3,
+            )
+        multi = net_res["nodes_df"][
+            (net_res["nodes_df"]["primary_community"] == c) & (net_res["nodes_df"]["overlap_count"] > 1)
+        ]
+        if len(multi) > 0:
+            ax.scatter(
+                multi["x"],
+                multi["y"],
+                color=[cols[c] / 255.0],
+                s=52,
+                alpha=0.95,
+                edgecolors="black",
+                linewidths=1.8,
+                label=f"Community {c} (overlapping, {len(multi)})",
+                zorder=4,
+            )
+
+    ax.set_title("Spatial community map (black outline = overlapping community node)", fontsize=10)
+    ax.axis("off")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig)
+    st.caption(
+        "Gray points: unassigned nodes (not part of any k-clique). Solid colors: single community membership. "
+        "Black border rings: overlapping nodes that belong to multiple communities."
+    )
+
+    if net_res["n_overlapping"] > 0:
+        with st.expander(f"Overlapping community nodes ({net_res['n_overlapping']} nodes)", expanded=False):
+            over_df = net_res["nodes_df"][net_res["nodes_df"]["overlap_count"] > 1]
+            st.dataframe(
+                over_df[["node_id", "y", "x", "tissue_r", "degree", "community_ids", "overlap_count"]],
+                width="stretch",
+            )
+
+    # Distribution plots
+    pcol1, pcol2 = st.columns(2)
+    with pcol1:
+        fig_d, ax_d = plt.subplots(figsize=(5, 3))
+        ax_d.hist(net_res["nodes_df"]["degree"], bins=20, color="steelblue", edgecolor="black", lw=0.5)
+        ax_d.set_xlabel("Node degree")
+        ax_d.set_ylabel("Nodes")
+        ax_d.set_title("Node degree distribution", fontsize=9)
+        ax_d.grid(alpha=0.3)
+        fig_d.tight_layout()
+        st.pyplot(fig_d)
+    with pcol2:
+        fig_r, ax_r = plt.subplots(figsize=(5, 3))
+        ax_r.hist(net_res["nodes_df"]["tissue_r"], bins=20, color="darkseagreen", edgecolor="black", lw=0.5)
+        ax_r.set_xlabel("Tissue Pearson r")
+        ax_r.set_ylabel("Nodes")
+        ax_r.set_title("Tissue correlation distribution (retained nodes)", fontsize=9)
+        ax_r.grid(alpha=0.3)
+        fig_r.tight_layout()
+        st.pyplot(fig_r)
+
+    # Direct CSV Download Buttons
+    st.divider()
+    st.subheader("Download network results")
+    dc1, dc2, dc3 = st.columns(3)
+    dc1.download_button(
+        "⬇ network_nodes.csv",
+        net_res["nodes_df"].to_csv(index=False).encode(),
+        "network_nodes.csv",
+        "text/csv",
+        key="dl_net_nodes" + sfx,
+    )
+    dc2.download_button(
+        "⬇ network_edges.csv",
+        net_res["edges_df"].to_csv(index=False).encode(),
+        "network_edges.csv",
+        "text/csv",
+        key="dl_net_edges" + sfx,
+    )
+    dc3.download_button(
+        "⬇ network_summary.csv",
+        net_res["summary_df"].to_csv(index=False).encode(),
+        "network_summary.csv",
+        "text/csv",
+        key="dl_net_summary" + sfx,
+    )
+
+
+with T[TAB_NET]:
+    roi_split(render_network, "net")
+
 # ---------------------------------------------------------- Downloads
 with T[TAB_DL]:
     # ------------------------------------------------ save straight to a folder
@@ -1632,6 +1923,18 @@ with T[TAB_DL]:
             "tissue_state_assignments.csv", "csv", ss["tissue_cluster_df"])
     if R.get("link") and reg.get("mask_per_frame"):
         _avail["Tracked masks (tracked_masks.tiff)"] = ("tracked_masks.tiff", "stack", None)
+
+    # Network analysis outputs if present
+    _net_res_active = (
+        ss.get("_net_result_roi")
+        if (roi_ids and ss.get("_net_result_roi") and not ss.get("_net_result_roi", {}).get("error"))
+        else ss.get("_net_result_all")
+    )
+    if _net_res_active and not _net_res_active.get("error"):
+        _avail["Network nodes (network_nodes.csv)"] = ("network_nodes.csv", "csv", _net_res_active["nodes_df"])
+        _avail["Network edges (network_edges.csv)"] = ("network_edges.csv", "csv", _net_res_active["edges_df"])
+        _avail["Network summary (network_summary.csv)"] = ("network_summary.csv", "csv", _net_res_active["summary_df"])
+
     for _k, _lbl in (("ai_story", "AI findings — clusters (ai_findings_clusters.md)"),
                      ("ai_story_full", "AI findings — full time-course (ai_findings_timecourse.md)")):
         if ss.get(_k):
@@ -1675,3 +1978,10 @@ with T[TAB_DL]:
                            "roi_cells_normalized.csv", "text/csv")
     st.download_button("⬇ metrics (CSV)", pd.DataFrame([stats]).to_csv(index=False).encode(),
                        "metrics.csv", "text/csv")
+    if _net_res_active and not _net_res_active.get("error"):
+        st.download_button("⬇ network nodes (CSV)", _net_res_active["nodes_df"].to_csv(index=False).encode(),
+                           "network_nodes.csv", "text/csv", key="dl_ind_net_nodes")
+        st.download_button("⬇ network edges (CSV)", _net_res_active["edges_df"].to_csv(index=False).encode(),
+                           "network_edges.csv", "text/csv", key="dl_ind_net_edges")
+        st.download_button("⬇ network summary (CSV)", _net_res_active["summary_df"].to_csv(index=False).encode(),
+                           "network_summary.csv", "text/csv", key="dl_ind_net_summary")
