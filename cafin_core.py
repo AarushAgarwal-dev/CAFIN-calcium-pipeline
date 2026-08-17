@@ -1161,17 +1161,15 @@ def analyze_calcium_network(
     max_deg = max(degrees) if degrees else 0
     n_components = int(nx.number_connected_components(G)) if n_retained > 0 else 0
 
-    # Clique estimate safety check based on max node degree
-    if max_deg >= 22 and k_clique >= 4:
-        import math
-        try:
-            est_cliques = math.comb(min(max_deg, 30), min(int(k_clique), 10))
-        except Exception:
-            est_cliques = 100000
-        if est_cliques > 15000:
+    # Clique count safety preflight check
+    import itertools
+    try:
+        clique_gen = nx.find_cliques(G)
+        sample_cliques = list(itertools.islice(clique_gen, 25001))
+        if len(sample_cliques) > 25000:
             return {
                 "error": (
-                    f"Local node connectivity (max degree {max_deg}) produces too many potential cliques (~{est_cliques:,}). "
+                    f"Graph contains too many candidate cliques (>25,000). "
                     f"Increase the Pearson R² threshold or reduce sample size."
                 ),
                 "safety": True,
@@ -1179,6 +1177,8 @@ def analyze_calcium_network(
                 "n_edges": n_edges,
                 "density": density,
             }
+    except Exception:
+        pass
 
     # 11. k-clique community detection
     try:
