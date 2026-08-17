@@ -13,6 +13,7 @@ CORE = {
     "matplotlib": "matplotlib", "opencv": "cv2", "scikit-image": "skimage",
     "tifffile": "tifffile", "Pillow": "PIL", "Streamlit": "streamlit",
     "Plotly": "plotly", "scikit-learn": "sklearn", "Cellpose": "cellpose",
+    "NetworkX": "networkx",
 }
 OPTIONAL = {"Elastic registration": "itk", "Amazon Bedrock": "boto3",
             "Paper generation": "docx"}
