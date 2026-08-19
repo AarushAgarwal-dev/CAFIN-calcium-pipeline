@@ -68,10 +68,12 @@ per-frame transform, so each cell is followed as it moves/deforms.
 - **Clustering** – check whole traces and/or specific biological inputs before PCA + K-means: first-peak
   time, peak count, amplitude, width, area, inter-peak timing, per-cell activity, and tissue coupling.
   A separate tissue-state mode clusters frames from whole-field signal and active-cell fraction.
-- **Network Analysis** – pixel-level correlation network and k-clique community detection based on
-  NetworkX. Features spatial community mapping, overlapping-community tracking (rendered with bold
-  black outline markers), degree and correlation distributions, multi-factor safety preflight guards,
-  and direct CSV downloads (`network_nodes.csv`, `network_edges.csv`, `network_summary.csv`).
+- **Network Analysis** – cell-level correlation network from the extracted ΔF/F0i traces and
+  k-clique community detection based on NetworkX. One node is one segmented cell, with ROI-aware
+  spatial mapping, overlapping-community tracking, degree and cell-to-tissue correlation plots,
+  dense-graph safety guards, and direct CSV downloads (`network_nodes.csv`, `network_edges.csv`,
+  `network_summary.csv`). Pearson R² includes strong negative relationships by default; a positive-only
+  edge option is available.
 - **Tracking** – tracked vs. static ROI position per frame (tracking modes only).
 - **Statistics** – metrics table + violin plots (amplitude / interval / area) +
   fraction-of-active-cells curve.

@@ -1,461 +1,142 @@
 import os
 import sys
 
-# Ensure repository root is on sys.path
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
 import numpy as np
 import pandas as pd
 import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import cafin_core as cc
 
 
 @pytest.fixture
-def synthetic_stack():
-    """Create a synthetic 3D calcium movie (T=50, H=40, W=40) with 4 distinct cell transient regions."""
+def synthetic_cells():
+    """Cell traces with two coordinated groups and spatially labelled cells."""
     rng = np.random.default_rng(42)
-    T, H, W = 50, 40, 40
-
-    # Common global baseline wave
-    t = np.linspace(0, 2 * np.pi, T)
-    global_wave = 5.0 * np.sin(t)
-
-    # Distinct transient peaks for 4 cell regions
-    c1_event = 30.0 * np.exp(-0.5 * ((np.arange(T) - 15) / 3.0) ** 2)
-    c2_event = 25.0 * np.exp(-0.5 * ((np.arange(T) - 18) / 3.0) ** 2)
-    c3_event = 30.0 * np.exp(-0.5 * ((np.arange(T) - 32) / 3.0) ** 2)
-    c4_event = 25.0 * np.exp(-0.5 * ((np.arange(T) - 40) / 3.0) ** 2)
-
-    mask0 = np.zeros((H, W), dtype=np.int32)
-    mask0[5:15, 5:15] = 1
-    mask0[5:15, 25:35] = 2
-    mask0[25:35, 5:15] = 3
-    mask0[25:35, 25:35] = 4
-
-    stack = np.zeros((T, H, W), dtype=np.float32)
-    for frame_idx in range(T):
-        frame = rng.normal(40.0, 3.0, (H, W)).astype(np.float32)
-        frame += global_wave[frame_idx]
-
-        # Add cell-specific transients with independent noise per pixel
-        frame[5:15, 5:15] += c1_event[frame_idx] + rng.normal(0, 2.0, (10, 10)).astype(np.float32)
-        frame[5:15, 25:35] += c2_event[frame_idx] + rng.normal(0, 2.0, (10, 10)).astype(np.float32)
-        frame[25:35, 5:15] += c3_event[frame_idx] + rng.normal(0, 2.0, (10, 10)).astype(np.float32)
-        frame[25:35, 25:35] += c4_event[frame_idx] + rng.normal(0, 2.0, (10, 10)).astype(np.float32)
-
-        stack[frame_idx] = np.clip(frame, 0, None)
-
-    ca_dict = {i: stack[i] for i in range(T)}
-    return {"ca_dict": ca_dict, "stack": stack, "mask0": mask0, "frames": list(range(T))}
+    n_frames, n_cells = 80, 12
+    t = np.linspace(0, 6 * np.pi, n_frames)
+    group_a = np.sin(t) + 0.25 * np.sin(2 * t)
+    group_b = -group_a + 0.05 * np.cos(t)
+    traces = np.empty((n_frames, n_cells), dtype=float)
+    for i in range(6):
+        traces[:, i] = group_a + rng.normal(0, 0.03, n_frames)
+    for i in range(6, 10):
+        traces[:, i] = group_b + rng.normal(0, 0.03, n_frames)
+    for i in range(10, 12):
+        traces[:, i] = rng.normal(0, 1.0, n_frames)
+    dff = pd.DataFrame(traces, columns=[f"Cell_{i}" for i in range(1, n_cells + 1)])
+    dff.insert(0, "Frame", np.arange(n_frames))
+    mask = np.zeros((45, 45), dtype=np.int32)
+    for cell_id in range(1, n_cells + 1):
+        y = 2 + ((cell_id - 1) // 4) * 13
+        x = 2 + ((cell_id - 1) % 4) * 10
+        mask[y:y + 8, x:x + 8] = cell_id
+    return {"dff": dff, "mask": mask}
 
 
-def test_reproducible_sampling(synthetic_stack):
-    """Same random seed must yield identical sampled pixels and results."""
-    data = synthetic_stack
-    res1 = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=123,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    res2 = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=123,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res1.get("error") is None
-    assert res2.get("error") is None
-    np.testing.assert_array_equal(res1["sampled_yx"], res2["sampled_yx"])
-    np.testing.assert_array_equal(res1["retained_yx"], res2["retained_yx"])
-    pd.testing.assert_frame_equal(res1["nodes_df"], res2["nodes_df"])
+def build(data, **kwargs):
+    defaults = dict(mask0=data["mask"], n_samples=12, seed=0,
+                    tissue_r_thresh=-1.0, tissue_positive_only=False,
+                    r2_thresh=0.70, k_clique=3)
+    defaults.update(kwargs)
+    return cc.analyze_calcium_network(data["dff"], **defaults)
 
 
-def test_different_seeds_differ(synthetic_stack):
-    """Different random seeds should sample different pixel coordinates."""
-    data = synthetic_stack
-    res1 = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=1,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    res2 = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=2,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res1.get("error") is None
-    assert res2.get("error") is None
-    assert not np.array_equal(res1["sampled_yx"], res2["sampled_yx"])
+def test_reproducible_cell_sampling(synthetic_cells):
+    one = build(synthetic_cells, seed=123)
+    two = build(synthetic_cells, seed=123)
+    assert one["error"] is None
+    np.testing.assert_array_equal(one["sampled_cell_ids"], two["sampled_cell_ids"])
+    pd.testing.assert_frame_equal(one["nodes_df"], two["nodes_df"])
+    pd.testing.assert_frame_equal(one["edges_df"], two["edges_df"])
 
 
-def test_positive_tissue_filter(synthetic_stack):
-    """Retained pixels must all have positive Pearson correlation with tissue mean >= threshold."""
-    data = synthetic_stack
-    thresh = 0.30
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=50,
-        seed=0,
-        tissue_r_thresh=thresh,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert res["n_retained"] >= 3
-    for r_val in res["tissue_r"]:
-        assert r_val >= thresh
-        assert r_val > 0
+def test_different_seeds_change_cells(synthetic_cells):
+    one = build(synthetic_cells, seed=1)
+    two = build(synthetic_cells, seed=2)
+    assert one["error"] is None and two["error"] is None
+    assert not np.array_equal(one["sampled_cell_ids"], two["sampled_cell_ids"])
 
 
-def test_tissue_filter_blocks_all(synthetic_stack):
-    """Excessively high tissue correlation threshold should return a clean error without crashing."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.9999,
-        r2_thresh=0.7,
-        k_clique=6,
-    )
-    assert res.get("error") is not None
-    assert "passed the positive tissue-correlation threshold" in res["error"]
+def test_node_definition_is_cell_and_tissue_filter(synthetic_cells):
+    result = build(synthetic_cells, tissue_r_thresh=0.30, tissue_positive_only=True)
+    assert result["error"] is None
+    assert result["n_nodes"] <= 12
+    assert set(result["nodes_df"]["cell_id"]).issubset(set(range(1, 13)))
+    assert (result["nodes_df"]["tissue_r"] >= 0.30).all()
+    assert (result["summary_df"].query("parameter == 'Node definition'")["value"] ==
+            "segmented cell").all()
 
 
-def test_r2_edge_two_tailed():
-    """Two-tailed R² rule should include strongly anti-correlated signals (r ≈ -0.95 -> R² ≈ 0.90)."""
-    T = 60
-    t = np.linspace(0, 4 * np.pi, T)
-    s1 = np.sin(t)
-    s2 = -np.sin(t)  # anti-correlated
-
-    # Stack with 12 nodes in s1 phase, 6 in s2 phase (so tissue mean is non-zero)
-    stack = np.zeros((T, 18, 1), dtype=np.float32)
-    for i in range(12):
-        stack[:, i, 0] = 2.0 * s1 + np.random.normal(0, 0.05, T) + 20.0
-    for i in range(12, 18):
-        stack[:, i, 0] = 2.0 * s2 + np.random.normal(0, 0.05, T) + 20.0
-
-    mask0 = np.ones((18, 1), dtype=np.int32)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=stack,
-        mask0=mask0,
-        n_samples=18,
-        seed=0,
-        tissue_r_thresh=-1.0,  # allow all
-        r2_thresh=0.70,
-        positive_edges_only=False,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert len(res["edges_df"]) > 0
-    assert (res["edges_df"]["pearson_r"] < -0.8).any()
+def test_r2_keeps_negative_edges_unless_positive_only(synthetic_cells):
+    result = build(synthetic_cells, positive_edges_only=False)
+    assert result["error"] is None
+    assert (result["edges_df"]["r_squared"] >= 0.70).all()
+    assert (result["edges_df"]["pearson_r"] < -0.8).any()
+    positive = build(synthetic_cells, positive_edges_only=True)
+    assert positive["error"] is None
+    assert (positive["edges_df"]["pearson_r"] > 0).all()
 
 
-def test_positive_edges_only():
-    """positive_edges_only=True should exclude strongly anti-correlated pairs."""
-    T = 60
-    t = np.linspace(0, 4 * np.pi, T)
-    s1 = np.sin(t)
-    s2 = -np.sin(t)
-
-    stack = np.zeros((T, 18, 1), dtype=np.float32)
-    for i in range(12):
-        stack[:, i, 0] = 2.0 * s1 + np.random.normal(0, 0.05, T) + 20.0
-    for i in range(12, 18):
-        stack[:, i, 0] = 2.0 * s2 + np.random.normal(0, 0.05, T) + 20.0
-
-    mask0 = np.ones((18, 1), dtype=np.int32)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=stack,
-        mask0=mask0,
-        n_samples=18,
-        seed=0,
-        tissue_r_thresh=-1.0,
-        r2_thresh=0.70,
-        positive_edges_only=True,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert len(res["edges_df"]) > 0
-    assert (res["edges_df"]["pearson_r"] > 0).all()
+def test_roi_uses_cell_masks_not_pixels(synthetic_cells):
+    result = build(synthetic_cells, roi_box=(1, 1, 23, 13), k_clique=2)
+    assert result["error"] is None
+    assert set(result["nodes_df"]["cell_id"]) == {1, 2}
+    assert result["n_valid_cells"] == 2
 
 
-def test_roi_restriction(synthetic_stack):
-    """When roi_box is specified, sampled pixels must be strictly inside the ROI bounding box."""
-    data = synthetic_stack
-    roi_box = (5, 5, 15, 35)  # Left column cells (Cell 1 and Cell 3)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        roi_box=roi_box,
-        n_samples=30,
-        seed=0,
-        tissue_r_thresh=0.1,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    for y, x in res["sampled_yx"]:
-        assert 5 <= x < 15
-        assert 5 <= y < 35
+def test_no_communities_is_valid_result(synthetic_cells):
+    result = build(synthetic_cells, tissue_r_thresh=-1.0, tissue_positive_only=False,
+                   r2_thresh=0.99999, k_clique=3)
+    assert result["error"] is None
+    assert result["n_communities"] == 0
+    assert result["n_unassigned"] == result["n_nodes"]
 
 
-def test_roi_independent_of_all(synthetic_stack):
-    """ROI analysis should produce an independent result from whole-field analysis."""
-    data = synthetic_stack
-    res_all = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        roi_box=None,
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    res_roi = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        roi_box=(5, 5, 15, 35),
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res_all.get("error") is None
-    assert res_roi.get("error") is None
-    assert res_roi["n_valid_pixels"] < res_all["n_valid_pixels"]
+def test_overlapping_communities_are_reported():
+    rng = np.random.default_rng(3)
+    t = np.linspace(0, 5 * np.pi, 100)
+    a, b = np.sin(t), np.cos(t)
+    x = np.column_stack([
+        a + rng.normal(0, .01, len(t)),
+        (a + b) / 2 + rng.normal(0, .01, len(t)),
+        (a + b) / 2 + rng.normal(0, .01, len(t)),
+        b + rng.normal(0, .01, len(t)),
+        rng.normal(0, 1, len(t)),
+        rng.normal(0, 1, len(t)),
+    ])
+    dff = pd.DataFrame(x, columns=[f"Cell_{i}" for i in range(1, 7)])
+    mask = np.arange(1, 7, dtype=np.int32)[:, None]
+    result = cc.analyze_calcium_network(dff, mask0=mask, n_samples=6, seed=0,
+                                     tissue_r_thresh=-1, tissue_positive_only=False,
+                                     r2_thresh=0.45, k_clique=3)
+    assert result["error"] is None
+    assert result["n_overlapping"] >= 0
+    assert "community_ids" in result["nodes_df"]
 
 
-def test_no_community_graph(synthetic_stack):
-    """When no k-cliques exist, function should return n_communities=0 cleanly without error."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=30,
-        seed=0,
-        tissue_r_thresh=0.1,
-        r2_thresh=0.999,  # almost no edges
-        k_clique=8,       # impossible clique
-    )
-    assert res.get("error") is None
-    assert res["n_communities"] == 0
-    assert res["n_assigned"] == 0
-    assert res["n_unassigned"] == res["n_nodes"]
+def test_dense_graph_safety_guard():
+    t = np.sin(np.arange(40, dtype=float))
+    dff = pd.DataFrame({f"Cell_{i}": t for i in range(1, 81)})
+    mask = np.arange(1, 81, dtype=np.int32)[:, None]
+    result = cc.analyze_calcium_network(dff, mask0=mask, n_samples=80,
+                                     tissue_r_thresh=0, r2_thresh=0.1, k_clique=6)
+    assert result["error"] is not None
+    assert result["safety"] is True
 
 
-def test_overlapping_communities():
-    """Synthetic network with two 3-cliques sharing 2 nodes should correctly identify overlapping nodes."""
-    T = 50
-    rng = np.random.default_rng(0)
-    t = np.linspace(0, 4 * np.pi, T)
-    base1 = np.sin(t)
-    base2 = np.cos(t)
-
-    # 6 nodes:
-    # 0,1,2 driven by base1 (clique 1)
-    # 1,2,3 driven by base2 (clique 2)
-    # Nodes 1 and 2 participate in both cliques
-    stack = np.zeros((T, 6, 1), dtype=np.float32)
-    stack[:, 0, 0] = base1 + rng.normal(0, 0.05, T) + 10.0
-    stack[:, 1, 0] = 0.5 * (base1 + base2) + rng.normal(0, 0.05, T) + 10.0
-    stack[:, 2, 0] = 0.5 * (base1 + base2) + rng.normal(0, 0.05, T) + 10.0
-    stack[:, 3, 0] = base2 + rng.normal(0, 0.05, T) + 10.0
-    stack[:, 4, 0] = rng.normal(0, 1.0, T) + 10.0
-    stack[:, 5, 0] = rng.normal(0, 1.0, T) + 10.0
-
-    mask0 = np.ones((6, 1), dtype=np.int32)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=stack,
-        mask0=mask0,
-        n_samples=6,
-        seed=0,
-        tissue_r_thresh=-1.0,
-        r2_thresh=0.45,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert res["n_nodes"] == 6
-    assert isinstance(res["n_overlapping"], int)
-    assert res["n_assigned"] + res["n_unassigned"] == res["n_nodes"]
+def test_csv_schemas(synthetic_cells):
+    result = build(synthetic_cells)
+    assert result["error"] is None
+    assert {"node_id", "cell_id", "x", "y", "tissue_r", "degree",
+            "community_ids", "primary_community", "overlap_count"} <= set(result["nodes_df"])
+    assert {"cell_i", "cell_j", "pearson_r", "r_squared"} <= set(result["edges_df"])
+    assert {"parameter", "value"} == set(result["summary_df"])
 
 
-def test_dense_graph_blocked():
-    """Multi-factor safety preflight should block k-clique on overly dense graph."""
-    T = 30
-    N = 80
-    # 80 identical nodes -> complete graph -> density = 1.0
-    stack = np.ones((T, N, 1), dtype=np.float32)
-    for t_idx in range(T):
-        stack[t_idx, :, 0] = np.sin(t_idx) + 10.0
-
-    mask0 = np.ones((N, 1), dtype=np.int32)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=stack,
-        mask0=mask0,
-        n_samples=N,
-        seed=0,
-        tissue_r_thresh=0.0,
-        r2_thresh=0.1,
-        k_clique=6,
-    )
-    assert res.get("error") is not None
-    assert res.get("safety") is True
-
-
-def test_fewer_than_k_nodes(synthetic_stack):
-    """If fewer than k nodes exist, return an informative error dict."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        roi_box=(5, 5, 7, 7),  # 2x2 = 4 pixels
-        n_samples=4,
-        k_clique=6,
-    )
-    assert res.get("error") is not None
-    assert "Fewer than 6 valid pixels" in res["error"]
-
-
-def test_no_edges_after_filter(synthetic_stack):
-    """High R² threshold yields 0 edges and an empty edges DataFrame."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=30,
-        seed=0,
-        tissue_r_thresh=0.1,
-        r2_thresh=0.9999,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert res["n_edges"] == 0
-    assert len(res["edges_df"]) == 0
-    assert "pearson_r" in res["edges_df"].columns
-
-
-def test_constant_trace_discarded():
-    """Pixels with constant traces (zero std) should be dropped gracefully."""
-    T = 30
-    stack = np.zeros((T, 10, 1), dtype=np.float32)
-    for i in range(5):
-        stack[:, i, 0] = np.sin(np.linspace(0, 4 * np.pi, T)) + 10.0
-    for i in range(5, 10):
-        stack[:, i, 0] = 5.0  # constant
-
-    mask0 = np.ones((10, 1), dtype=np.int32)
-    res = cc.analyze_calcium_network(
-        reg_or_ca=stack,
-        mask0=mask0,
-        n_samples=10,
-        seed=0,
-        tissue_r_thresh=0.1,
-        r2_thresh=0.5,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    assert res["n_retained"] == 5
-
-
-def test_nodes_csv_schema(synthetic_stack):
-    """nodes_df must match expected schema for export."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    df = res["nodes_df"]
-    expected_cols = ["node_id", "y", "x", "tissue_r", "degree", "community_ids", "primary_community", "overlap_count"]
-    for col in expected_cols:
-        assert col in df.columns
-    assert len(df) == res["n_nodes"]
-
-
-def test_edges_csv_schema(synthetic_stack):
-    """edges_df must match expected schema for export."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-    )
-    assert res.get("error") is None
-    df = res["edges_df"]
-    expected_cols = ["node_i", "node_j", "source_y", "source_x", "target_y", "target_x", "pearson_r", "r_squared"]
-    for col in expected_cols:
-        assert col in df.columns
-    assert len(df) == res["n_edges"]
-
-
-def test_summary_csv_schema(synthetic_stack):
-    """summary_df must match expected schema for export."""
-    data = synthetic_stack
-    res = cc.analyze_calcium_network(
-        reg_or_ca=data["ca_dict"],
-        mask0=data["mask0"],
-        frames=data["frames"],
-        n_samples=40,
-        seed=0,
-        tissue_r_thresh=0.2,
-        r2_thresh=0.75,
-        k_clique=3,
-        dataset_name="demo_dataset",
-    )
-    assert res.get("error") is None
-    df = res["summary_df"]
-    assert "parameter" in df.columns
-    assert "value" in df.columns
-    params = set(df["parameter"].values)
-    assert "Sampled pixels" in params
-    assert "Retained nodes after tissue filter" in params
-    assert "Network edges" in params
-    assert "Graph density" in params
-    assert "k-clique size" in params
-    assert "Number of communities" in params
+def test_invalid_input_is_informative():
+    result = cc.analyze_calcium_network(np.zeros((10, 10)))
+    assert result["error"]

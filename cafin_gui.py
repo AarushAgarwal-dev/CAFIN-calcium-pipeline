@@ -576,6 +576,10 @@ if run:
     # caches before a new analysis so no stale GIF can be mistaken for new results.
     for _gif_cache_key in [k for k in ss if k.startswith("_gif_export_")]:
         del ss[_gif_cache_key]
+    # Network results belong to the exact registered movie and cell traces.
+    # Never expose a previous recording's graph after a new analysis runs.
+    for _network_key in [k for k in ss if k.startswith(("_cellnet_", "_net_"))]:
+        del ss[_network_key]
     n_use = n_frames if max_frames == 0 else min(max_frames, n_frames)
     prog = st.progress(0.0, text="Starting…")
     tstats = None
@@ -695,19 +699,29 @@ with T[TAB_REG]:
     fsel = fr[ridx]
 
     first_mem = reg["raw_mem"][0]
-    before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(fsel, first_mem))
-    after = cc.two_color_overlay(first_mem, reg["reg_mem"].get(fsel, first_mem))
+    mem_before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(fsel, first_mem))
+    mem_after = cc.two_color_overlay(first_mem, reg["reg_mem"].get(fsel, first_mem))
     a, b = st.columns(2)
-    a.image(before, caption=f"BEFORE — frame {fsel}", width="stretch")
-    b.image(after, caption=f"AFTER — frame {fsel}", width="stretch")
+    a.image(mem_before, caption=f"Membrane BEFORE — frame {fsel}", width="stretch")
+    b.image(mem_after, caption=f"Membrane AFTER — frame {fsel}", width="stretch")
+    first_ca = reg["raw_ca"].get(0, reg["reg_ca"].get(0))
+    ca_before = cc.two_color_overlay(first_ca, reg["raw_ca"].get(fsel, first_ca))
+    ca_after = cc.two_color_overlay(first_ca, reg["reg_ca"].get(fsel, first_ca))
+    a, b = st.columns(2)
+    a.image(ca_before, caption=f"Ca²⁺ BEFORE — frame {fsel}", width="stretch")
+    b.image(ca_after, caption=f"Ca²⁺ AFTER — frame {fsel}", width="stretch")
 
     def _registration_gif_frames():
         movie = []
         for _frame_no in _gif_frame_ids(fr):
-            _before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(_frame_no, first_mem))
-            _after = cc.two_color_overlay(first_mem, reg["reg_mem"].get(_frame_no, first_mem))
-            movie.append(_label_gif_frame(_stack_gif_frames(_before, _after),
-                                          f"Frame {_frame_no}: before | after"))
+            _mem_before = cc.two_color_overlay(first_mem, reg["raw_mem"].get(_frame_no, first_mem))
+            _mem_after = cc.two_color_overlay(first_mem, reg["reg_mem"].get(_frame_no, first_mem))
+            _ca_before = cc.two_color_overlay(first_ca, reg["raw_ca"].get(_frame_no, first_ca))
+            _ca_after = cc.two_color_overlay(first_ca, reg["reg_ca"].get(_frame_no, first_ca))
+            movie.append(_label_gif_frame(
+                _stack_gif_frames(_stack_gif_frames(_mem_before, _mem_after),
+                                  _stack_gif_frames(_ca_before, _ca_after)),
+                f"Frame {_frame_no}: membrane before | after · Ca²⁺ before | after"))
         return movie
 
     gif_download_control("registration", "cafin_registration_overlay.gif",
@@ -717,8 +731,11 @@ with T[TAB_REG]:
 # ---------------------------------------------------------- Segmentation
 with T[TAB_SEG]:
     st.subheader(f"Cellpose segmentation — {int(mask0.max())} cells")
-    st.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
-             caption="Frame-0 membrane with numbered cell ROIs", width="stretch")
+    mc1, mc2 = st.columns(2)
+    mc1.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
+              caption="Frame-0 membrane with numbered cell ROIs", width="stretch")
+    mc2.image(cc.cellpose_colored_mask(mask0),
+              caption="Cellpose colored mask (direct label output)", width="stretch")
 
     st.subheader("Segmentation overlays (boundaries in red, cell IDs in yellow)")
     sfi, splay, sspd = frame_controls("seg", len(frames))
@@ -1596,7 +1613,8 @@ with T[TAB_STA]:
     roi_split(render_stats, "sta")
 
 # ---------------------------------------------------------- Network Analysis
-def render_network(df, sfx):
+def render_pixel_network_legacy(df, sfx):
+    """Retained only as historical code; the active tab uses cell networks below."""
     is_roi = "roi" in sfx and R.get("roi_box") is not None
     curr_roi_box = R.get("roi_box") if is_roi else None
 
@@ -1693,7 +1711,7 @@ def render_network(df, sfx):
     if st.button("🕸 Build network", type="primary", key="btn_net" + sfx):
         with st.spinner("Computing pixel correlations and k-clique communities…"):
             _bg_bxs = cc.auto_bg_boxes(reg["reg_ca"][frames[0]]) if R.get("do_bg") else None
-            res = cc.analyze_calcium_network(
+            res = cc.analyze_pixel_network_legacy(
                 reg_or_ca=reg,
                 mask0=mask0,
                 frames=frames,
@@ -1882,8 +1900,160 @@ def render_network(df, sfx):
     )
 
 
+def render_cell_network(df, sfx):
+    """Render communication analysis where each graph node is one cell."""
+    is_roi = "roi" in sfx and R.get("roi_box") is not None
+    curr_roi_box = R.get("roi_box") if is_roi else None
+    cell_cols = [c for c in df.columns if c.startswith("Cell_")]
+    if len(cell_cols) < 2:
+        st.info("At least two single-cell traces are needed for communication analysis.")
+        return
+
+    st.subheader("Communication analysis (single-cell calcium traces)")
+    st.caption(
+        "Each node is a segmented cell and each node signal is its extracted ΔF/F0i trace. "
+        "Cells are filtered by correlation with the field-average cell trace, connected using "
+        "Pearson R², and grouped with k-clique percolation."
+    )
+    c1, c2, c3 = st.columns(3)
+    n_samples = c1.number_input(
+        "Sampled cells", min_value=2, max_value=250, value=min(250, len(cell_cols)), step=1,
+        key="cellnet_samples" + sfx,
+        help="Randomly sample cells before pairwise correlation. Set this to the number of cells to use all available cells.",
+    )
+    seed = c2.number_input("Random seed", min_value=0, max_value=999999, value=0, step=1,
+                           key="cellnet_seed" + sfx)
+    k_clique = c3.number_input("k-clique size (k)", min_value=2, max_value=15, value=6, step=1,
+                               key="cellnet_k" + sfx,
+                               help="Minimum clique size for community percolation.")
+    c4, c5 = st.columns(2)
+    tissue_r_thresh = c4.slider(
+        "Cell-to-tissue Pearson r threshold", 0.0, 0.95, 0.30, 0.05,
+        key="cellnet_tissue_r" + sfx,
+        help="Keep cells whose activity follows the mean activity of eligible cells.")
+    r2_thresh = c5.slider(
+        "Pearson R² edge threshold", 0.0, 1.0, 0.70, 0.05,
+        key="cellnet_r2" + sfx,
+        help="R² ≥ 0.70 corresponds to |Pearson r| ≥ 0.837.")
+    c6, c7 = st.columns(2)
+    tissue_positive_only = c6.checkbox(
+        "Positive cell-to-tissue filter", value=True, key="cellnet_tissue_pos" + sfx,
+        help="The original workflow keeps cells positively correlated with the average activity.")
+    positive_edges = c7.checkbox(
+        "Positive-only communication edges", value=False, key="cellnet_pos_edge" + sfx,
+        help="Off reproduces the R² rule and includes strong anti-correlations as edges.")
+    st.caption(
+        "The default edge rule uses Pearson R², so strong negative correlations are retained too. "
+        "Enable positive-only edges only when anti-correlated activity should be excluded."
+    )
+
+    dataset_name = os.path.basename(trial.rstrip("/\\")) if "trial" in locals() and trial else ""
+    param_key = (dataset_name, tuple(curr_roi_box) if curr_roi_box else None,
+                 tuple(cell_cols), int(n_samples), int(seed), int(k_clique),
+                 float(tissue_r_thresh), float(r2_thresh), bool(tissue_positive_only),
+                 bool(positive_edges))
+    cache_key = "_cellnet_cache_" + sfx
+    result_key = "_cellnet_result_" + sfx
+    if ss.get(cache_key) != param_key:
+        ss.pop(result_key, None)
+    if st.button("🕸 Build cell communication network", type="primary", key="btn_cellnet" + sfx):
+        with st.spinner("Computing cell correlations and k-clique communities…"):
+            result = cc.analyze_cell_network(
+                dff_df=df, mask0=mask0, roi_box=curr_roi_box, n_samples=int(n_samples),
+                seed=int(seed), tissue_r_thresh=float(tissue_r_thresh),
+                r2_thresh=float(r2_thresh), positive_edges_only=bool(positive_edges),
+                tissue_positive_only=bool(tissue_positive_only), k_clique=int(k_clique),
+                restrict_to_mask=True, dataset_name=dataset_name,
+            )
+            ss[result_key] = result
+            ss[cache_key] = param_key
+            st.rerun()
+
+    result = ss.get(result_key)
+    if result is None:
+        st.info("Choose the settings and click **Build cell communication network**.")
+        return
+    if result.get("error"):
+        message = result["error"]
+        if result.get("safety"):
+            st.error(f"⚠️ **Safety guard:** {message}")
+        else:
+            st.warning(f"⚠️ **Communication analysis notice:** {message}")
+        return
+
+    m = st.columns(7)
+    m[0].metric("Cells", result["n_nodes"])
+    m[1].metric("Edges", result["n_edges"])
+    m[2].metric("Density", f"{result['density']:.3f}")
+    m[3].metric("Mean degree", f"{result['mean_degree']:.1f}")
+    m[4].metric("Components", result["n_components"])
+    m[5].metric("Communities", result["n_communities"])
+    m[6].metric("Overlapping cells", result["n_overlapping"])
+    if result["n_communities"] == 0:
+        st.info(f"No k-clique communities were found at k={k_clique} and R² ≥ {r2_thresh:.2f}.")
+
+    st.subheader("Spatial cell-community map")
+    show_edges = st.checkbox("Draw communication edges", value=False, key="cellnet_show_edges" + sfx)
+    edge_alpha = st.slider("Edge opacity", 0.05, 1.0, 0.25, 0.05,
+                           key="cellnet_edge_alpha" + sfx) if show_edges else 0.25
+    ref = reg["reg_ca"].get(frames[0], reg["reg_mem"][frames[0]])
+    h, w = ref.shape
+    fig, ax = plt.subplots(figsize=(8, max(4, int(8 * h / max(w, 1)))), dpi=120)
+    ax.imshow(cc.stretch8(ref, clahe=True), cmap="gray")
+    if curr_roi_box:
+        x1, y1, x2, y2 = curr_roi_box
+        ax.plot([x1, x2, x2, x1, x1], [y1, y1, y2, y2, y1], "--", color="yellow", lw=1.5)
+    if show_edges and len(result["edges_df"]):
+        for _, e in result["edges_df"].iterrows():
+            ax.plot([e["source_x"], e["target_x"]], [e["source_y"], e["target_y"]],
+                    color="cyan", alpha=float(edge_alpha), lw=0.8)
+    nodes = result["nodes_df"]
+    colors, _ = cluster_palette(max(1, result["n_communities"]))
+    unassigned = nodes[nodes["primary_community"] < 0]
+    if len(unassigned):
+        ax.scatter(unassigned["x"], unassigned["y"], c="gray", s=42, label="Unassigned", zorder=2)
+    for community in range(result["n_communities"]):
+        single = nodes[(nodes["primary_community"] == community) & (nodes["overlap_count"] == 1)]
+        overlap = nodes[(nodes["primary_community"] == community) & (nodes["overlap_count"] > 1)]
+        if len(single):
+            ax.scatter(single["x"], single["y"], color=colors[community] / 255.0, s=48,
+                       label=f"Community {community} (n={len(single)})", zorder=3)
+        if len(overlap):
+            ax.scatter(overlap["x"], overlap["y"], color=colors[community] / 255.0, s=68,
+                       edgecolors="black", linewidths=1.8,
+                       label=f"Community {community}, overlapping", zorder=4)
+    ax.set_title("Cell communication communities (black outline = overlap)", fontsize=10)
+    ax.axis("off")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig)
+    st.caption("One point is one cell. Gray cells are not in a k-clique; black outlines mark cells in multiple communities.")
+
+    if result["n_overlapping"]:
+        with st.expander(f"Overlapping cell memberships ({result['n_overlapping']})"):
+            st.dataframe(nodes[nodes["overlap_count"] > 1], width="stretch")
+    p1, p2 = st.columns(2)
+    with p1:
+        fig_d, ax_d = plt.subplots(figsize=(5, 3))
+        ax_d.hist(nodes["degree"], bins=min(20, max(1, len(nodes))), color="steelblue", edgecolor="black")
+        ax_d.set_xlabel("Cell degree"); ax_d.set_ylabel("Cells"); ax_d.set_title("Cell degree distribution")
+        ax_d.grid(alpha=0.3); st.pyplot(fig_d)
+    with p2:
+        fig_r, ax_r = plt.subplots(figsize=(5, 3))
+        ax_r.hist(nodes["tissue_r"], bins=min(20, max(1, len(nodes))), color="darkseagreen", edgecolor="black")
+        ax_r.set_xlabel("Cell-to-tissue Pearson r"); ax_r.set_ylabel("Cells")
+        ax_r.set_title("Cell-to-tissue correlation"); ax_r.grid(alpha=0.3); st.pyplot(fig_r)
+    st.dataframe(nodes, width="stretch", height=260)
+    st.download_button("⬇ cell network nodes (CSV)", nodes.to_csv(index=False).encode(),
+                       "network_nodes.csv", "text/csv", key="dl_cellnet_nodes" + sfx)
+    st.download_button("⬇ cell network edges (CSV)", result["edges_df"].to_csv(index=False).encode(),
+                       "network_edges.csv", "text/csv", key="dl_cellnet_edges" + sfx)
+    st.download_button("⬇ cell network summary (CSV)", result["summary_df"].to_csv(index=False).encode(),
+                       "network_summary.csv", "text/csv", key="dl_cellnet_summary" + sfx)
+
+
 with T[TAB_NET]:
-    roi_split(render_network, "net")
+    roi_split(render_cell_network, "net")
 
 # ---------------------------------------------------------- Downloads
 with T[TAB_DL]:
@@ -1926,9 +2096,10 @@ with T[TAB_DL]:
 
     # Network analysis outputs if present
     _net_res_active = (
-        ss.get("_net_result_roi")
-        if (roi_ids and ss.get("_net_result_roi") and not ss.get("_net_result_roi", {}).get("error"))
-        else ss.get("_net_result_all")
+        ss.get("_cellnet_result_roi")
+        if (roi_ids and ss.get("_cellnet_result_roi") and
+            not ss.get("_cellnet_result_roi", {}).get("error"))
+        else ss.get("_cellnet_result_all")
     )
     if _net_res_active and not _net_res_active.get("error"):
         _avail["Network nodes (network_nodes.csv)"] = ("network_nodes.csv", "csv", _net_res_active["nodes_df"])

@@ -485,6 +485,12 @@ def numbered_mask_overlay(reg_mem0, mask, clahe=False, font_size=9):
     return np.asarray(im)
 
 
+def cellpose_colored_mask(mask):
+    """Return Cellpose's native RGB label rendering on a white background."""
+    from cellpose import plot
+    return plot.mask_rgb(np.asarray(mask).astype(np.int32))
+
+
 # ============================================================ BACKGROUND
 def auto_bg_boxes(img, k=3, box=40):
     h, w = img.shape
@@ -930,7 +936,7 @@ def metrics(dff_df, threshold=0.5):
 
 
 # ============================================================ NETWORK ANALYSIS
-def analyze_calcium_network(
+def analyze_pixel_network_legacy(
     reg_or_ca,
     mask0=None,
     frames=None,
@@ -1283,3 +1289,261 @@ def analyze_calcium_network(
         "safety_triggered": False,
         "error": None,
     }
+
+
+# The communication analysis is deliberately defined after the original
+# exploratory pixel implementation above.  The public function below is the
+# one used by the GUI and tests: one node is one segmented cell, not one pixel.
+def analyze_cell_network(
+    dff_df,
+    mask0=None,
+    roi_box=None,
+    n_samples=250,
+    seed=0,
+    tissue_r_thresh=0.30,
+    r2_thresh=0.70,
+    positive_edges_only=False,
+    tissue_positive_only=True,
+    k_clique=6,
+    restrict_to_mask=True,
+    max_edges_for_clique=25000,
+    dataset_name="",
+):
+    """Build a cell-level calcium communication network.
+
+    This follows the referenced NetworkX workflow while using CAFIN's
+    extracted single-cell ΔF/F0i traces as the node signals. Each cell is a
+    node, its trace is correlated with the field-average cell trace for the
+    node filter, and pairwise Pearson R² determines graph edges. k-clique
+    percolation then identifies possibly overlapping communities.
+
+    ``positive_edges_only=False`` reproduces the R² convention: a strong
+    negative Pearson correlation also produces an edge. The tissue-reference
+    filter is positive by default because it removes cells that do not follow
+    the majority activity. Spatial coordinates come from ``mask0``; if no
+    mask is available, coordinates are reported as NaN but the graph remains
+    valid.
+    """
+    import networkx as nx
+    from networkx.algorithms.community import k_clique_communities
+
+    if not isinstance(dff_df, pd.DataFrame):
+        return {
+            "error": "Cell communication analysis requires a per-cell trace DataFrame.",
+            "safety": False,
+        }
+    cell_cols = [c for c in dff_df.columns if str(c).startswith("Cell_")]
+    if len(cell_cols) < 2:
+        return {"error": "At least two cell traces are required for communication analysis.",
+                "safety": False}
+    if len(dff_df) < 3:
+        return {"error": "At least three time points are required for correlation analysis.",
+                "safety": False}
+    if not 0.0 <= float(r2_thresh) <= 1.0:
+        return {"error": "The Pearson R² threshold must be between 0 and 1.", "safety": False}
+    if int(k_clique) < 2:
+        return {"error": "The k-clique size must be at least 2.", "safety": False}
+
+    try:
+        cell_ids = np.asarray([int(str(c).split("_", 1)[1]) for c in cell_cols], dtype=int)
+    except (IndexError, ValueError):
+        return {"error": "Cell trace columns must use the Cell_<integer> naming convention.",
+                "safety": False}
+
+    A = dff_df[cell_cols].to_numpy(dtype=float)
+    A = np.where(np.isfinite(A), A, np.nan)
+    n_frames, n_cells = A.shape
+
+    # Keep only cells represented by the selected segmented mask. This makes
+    # the all-cell and post-analysis ROI runs obey the same spatial rule.
+    centroids = {}
+    mask_ids = set(cell_ids.tolist())
+    if mask0 is not None:
+        m0 = np.asarray(mask0)
+        for p in regionprops(m0.astype(np.int32)):
+            cy, cx = p.centroid
+            centroids[int(p.label)] = (float(cx), float(cy))
+        if restrict_to_mask:
+            mask_ids &= set(centroids)
+
+    eligible = np.ones(n_cells, dtype=bool)
+    if restrict_to_mask and mask0 is not None:
+        eligible &= np.asarray([cid in mask_ids for cid in cell_ids], dtype=bool)
+    if roi_box is not None:
+        if mask0 is not None:
+            roi_ids = set(roi_cell_ids(np.asarray(mask0), roi_box))
+            eligible &= np.asarray([cid in roi_ids for cid in cell_ids], dtype=bool)
+        else:
+            x1, y1, x2, y2 = [int(v) for v in roi_box]
+            x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
+            eligible &= np.asarray([
+                cid in centroids and x1 <= centroids[cid][0] < x2 and y1 <= centroids[cid][1] < y2
+                for cid in cell_ids
+            ], dtype=bool)
+
+    eligible_idx = np.flatnonzero(eligible)
+    n_available = int(len(eligible_idx))
+    if n_available < int(k_clique):
+        return {
+            "error": f"Fewer than {k_clique} eligible cells are available ({n_available}).",
+            "safety": False,
+            "n_valid_cells": n_available,
+        }
+
+    # A field trace is the mean of the eligible cell activities, not a mean of
+    # arbitrary image pixels. The node sample is reproducible and capped to
+    # keep pairwise correlation and clique detection responsive.
+    n_samples_effective = int(min(max(1, int(n_samples)), 250, n_available))
+    rng = np.random.default_rng(int(seed))
+    sampled_idx = rng.choice(eligible_idx, size=n_samples_effective, replace=False)
+    sampled_cell_ids = cell_ids[sampled_idx]
+    tissue_mean = np.nanmean(A[:, eligible_idx], axis=1)
+
+    def _corr(a, b):
+        good = np.isfinite(a) & np.isfinite(b)
+        if int(good.sum()) < 3:
+            return np.nan
+        aa, bb = a[good], b[good]
+        if np.std(aa) <= 1e-12 or np.std(bb) <= 1e-12:
+            return np.nan
+        return float(np.corrcoef(aa, bb)[0, 1])
+
+    sampled_tissue_r = np.asarray([_corr(A[:, i], tissue_mean) for i in sampled_idx], dtype=float)
+    threshold = float(tissue_r_thresh)
+    if tissue_positive_only:
+        keep = (sampled_tissue_r >= threshold) & (sampled_tissue_r > 0)
+    else:
+        keep = sampled_tissue_r >= threshold
+    keep &= np.isfinite(sampled_tissue_r)
+    retained_local = np.flatnonzero(keep)
+    n_retained = int(len(retained_local))
+    if n_retained < int(k_clique):
+        return {
+            "error": (f"Only {n_retained} cells passed the tissue-correlation filter "
+                      f"(r ≥ {threshold:.2f}); k-clique requires at least {k_clique} nodes."),
+            "safety": False,
+            "n_valid_cells": n_available,
+            "n_sampled": n_samples_effective,
+            "n_retained": n_retained,
+            "sampled_cell_ids": sampled_cell_ids,
+            "tissue_r": sampled_tissue_r,
+        }
+
+    retained_idx = sampled_idx[retained_local]
+    retained_cell_ids = cell_ids[retained_idx]
+    traces = A[:, retained_idx].T
+    centered = traces - np.nanmean(traces, axis=1, keepdims=True)
+    scales = np.nanstd(centered, axis=1, keepdims=True)
+    valid_trace = np.isfinite(scales[:, 0]) & (scales[:, 0] > 1e-12)
+    if not np.all(valid_trace):
+        retained_idx = retained_idx[valid_trace]
+        retained_cell_ids = retained_cell_ids[valid_trace]
+        retained_local = retained_local[valid_trace]
+        traces = traces[valid_trace]
+        n_retained = int(len(retained_idx))
+        centered = traces - np.nanmean(traces, axis=1, keepdims=True)
+        scales = np.nanstd(centered, axis=1, keepdims=True)
+    if n_retained < int(k_clique):
+        return {"error": "Too few non-constant cell traces remain after filtering.", "safety": False,
+                "n_retained": n_retained}
+
+    # There are no NaNs after the valid-trace check in normal CAFIN output;
+    # pairwise finite masking keeps this robust for partially missing traces.
+    C = np.eye(n_retained, dtype=float)
+    for i in range(n_retained):
+        for j in range(i + 1, n_retained):
+            r = _corr(traces[i], traces[j])
+            C[i, j] = C[j, i] = 0.0 if not np.isfinite(r) else r
+    np.clip(C, -1.0, 1.0, out=C)
+    R2 = C ** 2
+    edge_mask = R2 >= float(r2_thresh)
+    if positive_edges_only:
+        edge_mask &= C > 0
+    np.fill_diagonal(edge_mask, False)
+    upper = np.triu_indices(n_retained, k=1)
+    edge_pairs = [(int(i), int(j)) for i, j in zip(upper[0], upper[1]) if edge_mask[i, j]]
+    n_edges = int(len(edge_pairs))
+    density = float(2 * n_edges / (n_retained * (n_retained - 1))) if n_retained > 1 else 0.0
+    mean_degree = float(2 * n_edges / n_retained) if n_retained else 0.0
+
+    # These guards run before NetworkX clique enumeration. No user override is
+    # offered because an accidental complete graph can otherwise freeze GUI.
+    if n_edges > int(max_edges_for_clique):
+        return {"error": (f"Graph has {n_edges:,} edges, above the safe limit of "
+                           f"{int(max_edges_for_clique):,}. Increase R² or reduce sampled cells."),
+                "safety": True, "n_retained": n_retained, "n_edges": n_edges, "density": density}
+    if n_retained >= 20 and density > 0.85:
+        return {"error": (f"Graph density is {density:.2f}, too high for safe k-clique detection. "
+                           "Increase R² or reduce sampled cells."), "safety": True,
+                "n_retained": n_retained, "n_edges": n_edges, "density": density}
+    if n_retained >= 25 and mean_degree > 0.70 * (n_retained - 1):
+        return {"error": (f"Mean cell degree is {mean_degree:.1f}, too high for safe k-clique detection. "
+                           "Increase R² or reduce sampled cells."), "safety": True,
+                "n_retained": n_retained, "n_edges": n_edges, "density": density}
+
+    G = nx.Graph()
+    for i, cid in enumerate(retained_cell_ids):
+        x, y = centroids.get(int(cid), (np.nan, np.nan))
+        G.add_node(i, cell_id=int(cid), x=x, y=y,
+                   tissue_r=float(sampled_tissue_r[retained_local[i]]))
+    for i, j in edge_pairs:
+        G.add_edge(i, j, weight=float(R2[i, j]), r=float(C[i, j]), r2=float(R2[i, j]))
+
+    communities = list(k_clique_communities(G, int(k_clique)))
+    communities.sort(key=lambda s: (-len(s), min(s) if s else -1))
+    membership = [[c for c, comm in enumerate(communities) if i in comm] for i in range(n_retained)]
+    primary = [ids[0] if ids else -1 for ids in membership]
+    overlap = [len(ids) for ids in membership]
+    degrees = [int(G.degree(i)) for i in range(n_retained)]
+    n_components = int(nx.number_connected_components(G))
+    coords = [centroids.get(int(cid), (np.nan, np.nan)) for cid in retained_cell_ids]
+    nodes_df = pd.DataFrame({
+        "node_id": np.arange(n_retained, dtype=int),
+        "cell_id": retained_cell_ids.astype(int),
+        "x": [p[0] for p in coords], "y": [p[1] for p in coords],
+        "tissue_r": np.round([sampled_tissue_r[retained_local[i]] for i in range(n_retained)], 4),
+        "degree": degrees,
+        "community_ids": [";".join(map(str, ids)) if ids else "None" for ids in membership],
+        "primary_community": primary,
+        "overlap_count": overlap,
+    })
+    edge_columns = ["node_i", "node_j", "cell_i", "cell_j", "source_x", "source_y",
+                    "target_x", "target_y", "pearson_r", "r_squared"]
+    edges_df = pd.DataFrame([
+        (i, j, int(retained_cell_ids[i]), int(retained_cell_ids[j]), coords[i][0], coords[i][1],
+         coords[j][0], coords[j][1], round(float(C[i, j]), 4), round(float(R2[i, j]), 4))
+        for i, j in edge_pairs
+    ], columns=edge_columns)
+    summary_rows = [
+        ("Dataset", str(dataset_name)), ("Node definition", "segmented cell"),
+        ("ROI active", bool(roi_box is not None)), ("ROI box", str(roi_box) if roi_box else "None"),
+        ("Random seed", int(seed)), ("Sampled cells", n_samples_effective),
+        ("Eligible cells", n_available), ("Retained nodes after tissue filter", n_retained),
+        ("Network edges", n_edges), ("Graph density", round(density, 4)),
+        ("Mean degree", round(mean_degree, 2)), ("Connected components", n_components),
+        ("k-clique size", int(k_clique)), ("Number of communities", len(communities)),
+        ("Assigned nodes", int(sum(v > 0 for v in overlap))),
+        ("Unassigned nodes", int(sum(v == 0 for v in overlap))),
+        ("Overlapping nodes", int(sum(v > 1 for v in overlap))),
+        ("Tissue correlation threshold", threshold), ("Tissue positive-only filter", bool(tissue_positive_only)),
+        ("Pearson R² threshold", float(r2_thresh)), ("Positive edges only", bool(positive_edges_only)),
+        ("Restrict to segmented mask", bool(restrict_to_mask)),
+    ]
+    return {
+        "nodes_df": nodes_df, "edges_df": edges_df,
+        "summary_df": pd.DataFrame(summary_rows, columns=["parameter", "value"]),
+        "graph": G, "n_valid_cells": n_available, "n_sampled": n_samples_effective,
+        "n_retained": n_retained, "n_nodes": n_retained, "n_edges": n_edges,
+        "density": density, "mean_degree": mean_degree, "n_components": n_components,
+        "n_communities": len(communities), "n_assigned": int(sum(v > 0 for v in overlap)),
+        "n_unassigned": int(sum(v == 0 for v in overlap)),
+        "n_overlapping": int(sum(v > 1 for v in overlap)), "k_clique": int(k_clique),
+        "communities": communities, "sampled_cell_ids": sampled_cell_ids,
+        "retained_cell_ids": retained_cell_ids, "tissue_r": sampled_tissue_r,
+        "error": None, "safety": False,
+    }
+
+
+def analyze_calcium_network(dff_df, **kwargs):
+    """Public communication-analysis API: one node per segmented cell."""
+    return analyze_cell_network(dff_df=dff_df, **kwargs)

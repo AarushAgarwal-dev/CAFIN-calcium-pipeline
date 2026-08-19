@@ -76,14 +76,13 @@ The pipeline runs in nine steps.
    (the coefficient of variation of peak amplitude) and temporal synchronization (the mean pairwise
    correlation). It also computes correlation against inter-cell
    distance and how activity changes over the recording.
-8. Network analysis. Pixel-level functional correlation network construction based on NetworkX.
-   Pixels are sampled with a reproducible seed (default 250, up to 1,000) from background-corrected
-   calcium frames, filtered by positive Pearson correlation with the tissue-average signal (default r ≥ 0.30),
-   and linked into network edges using Pearson R² (two-tailed by default to capture both strong positive
-   and negative correlations, with an optional positive-only edge filter). Communities are detected
-   via k-clique percolation (default k=6) with overlapping-node tracking and multi-factor safety
-   preflight guards against dense graph stalls. Exports include `network_nodes.csv`, `network_edges.csv`,
-   and `network_summary.csv`.
+8. Communication analysis. NetworkX builds a cell-level functional network from the extracted
+   single-cell ΔF/F0i traces. Each segmented cell is one node. Cells are optionally sampled with a
+   reproducible seed, filtered by correlation with the eligible-cell mean trace (default r ≥ 0.30),
+   and linked using Pearson R² (two-tailed by default, so strong positive and negative cell
+   relationships are retained). Communities are detected by k-clique percolation (default k=6),
+   with overlapping-cell tracking, ROI support, spatial mapping, and dense-graph safety guards.
+   Exports include `network_nodes.csv`, `network_edges.csv`, and `network_summary.csv`.
 9. Statistics. Normality is checked with Shapiro-Wilk. If both groups are normal it uses a Welch
    t-test, otherwise Mann-Whitney U. Effect sizes are reported as the rank-biserial correlation, and
    regional comparisons use Kruskal-Wallis.
