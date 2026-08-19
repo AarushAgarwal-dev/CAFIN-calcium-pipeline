@@ -82,7 +82,7 @@ def test_r2_keeps_negative_edges_unless_positive_only(synthetic_cells):
 
 
 def test_roi_uses_cell_masks_not_pixels(synthetic_cells):
-    result = build(synthetic_cells, roi_box=(1, 1, 23, 13), k_clique=2)
+    result = build(synthetic_cells, roi_box=(1, 1, 20, 13), k_clique=2)
     assert result["error"] is None
     assert set(result["nodes_df"]["cell_id"]) == {1, 2}
     assert result["n_valid_cells"] == 2

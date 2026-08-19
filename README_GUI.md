@@ -14,50 +14,43 @@ list used by `install.py`; it expects PyTorch to be installed first by the insta
 
 ## Run
 ```bash
-cd CAFIN_Cleanedup_Code
+cd CAFIN-calcium-pipeline
 streamlit run cafin_gui.py
 ```
 A browser tab opens. In the sidebar:
 1. Point **Trial folder** at a folder that contains `membrane/` and `ca2/`
    sub-folders of numbered `.tif` frames (base names are auto-detected).
 2. Pick an **analysis mode** (below).
-3. Open **Advanced parameters** to set cell diameter, frame sub-sampling
-   (elastic/optical-flow are slow on CPU — raise "process every Nth frame"),
+3. Open **Advanced parameters** to set cell diameter, frame sub-sampling,
    background subtraction, ΔF/F0 baseline, and peak threshold.
 4. Click **▶ Run analysis**.
 
-## GPU / CUDA
-The sidebar has a **"Use GPU (CUDA)"** toggle that accelerates the Cellpose
-segmentation step (the registration backends stay on CPU). It auto-detects
-whether a CUDA GPU is usable and shows the status; if you tick it without a
-usable GPU it safely falls back to CPU.
+## GPU backends
+The sidebar's **Use GPU for segmentation** option accelerates Cellpose when a
+usable backend is installed. Registration remains CPU-based. The GUI reports the
+backend it found and falls back to CPU if the requested backend is unavailable.
 
-CUDA works only with a CUDA build of PyTorch. The default install is CPU-only
-(`torch ...+cpu`). To enable the GPU:
+The installer chooses a compatible backend when possible:
+
+| Hardware | Backend |
+|---|---|
+| NVIDIA on Windows/Linux | CUDA |
+| AMD or Intel on Windows | DirectML |
+| AMD on Linux | ROCm |
+| Apple Silicon | MPS |
+| Intel macOS or unsupported GPU | CPU |
+
+For a manual CUDA install:
 ```bash
 pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
 ```
-(the pinned CUDA 12.1 build is used by the CAFIN installer). The standalone
-scripts (`run_pipeline_fixed.py`, `cafin_pipeline.py`) auto-use the GPU when one
-is present.
 
-## The 7 modes
-The manager's "4 options" are the **2×2 grid** of *registration × cell-handling*:
-
-| # | Registration | Cells | Notes |
-|---|--------------|-------|-------|
-| 1 | Rigid (ECC) | static frame-0 mask | fast; good when the fish barely moves |
-| 2 | Rigid (ECC) | **cell tracking** | ROI follows the tissue frame-to-frame |
-| 3 | Elastic B-spline (SimpleITK) | static frame-0 mask | handles warping |
-| 4 | Elastic B-spline (SimpleITK) | **cell tracking** | warping + ROI follows |
-
-Plus three extra modes: optical-flow + static, optical-flow + tracking, and
-no-registration + static (baseline sanity check).
-
-**Static vs. tracking:** static reuses one Cellpose mask from frame 0 for every
-frame (the paper's stated limitation — the ROI drifts off cells when the tissue
-deforms). Tracking warps that frame-0 mask into every frame using the
-per-frame transform, so each cell is followed as it moves/deforms.
+The current GUI exposes three analysis methods: **Rigid (ECC)** with a static
+reference mask, **Elastic (itk-elastix)** with a static reference mask, and
+**Cell tracking**, which segments frames separately and links cell identities.
+Tracking is available as its own method; it is not silently combined with the
+registration choices. A static mask follows the paper's reference-frame
+workflow, while tracking is the optional motion-aware alternative.
 
 ## Tabs
 - **Registration overlay** – heavy-contrast green/magenta overlay (green = frame 0,
@@ -74,9 +67,9 @@ per-frame transform, so each cell is followed as it moves/deforms.
   dense-graph safety guards, and direct CSV downloads (`network_nodes.csv`, `network_edges.csv`,
   `network_summary.csv`). Pearson R² includes strong negative relationships by default; a positive-only
   edge option is available.
-- **Tracking** – tracked vs. static ROI position per frame (tracking modes only).
-- **Statistics** – metrics table + violin plots (amplitude / interval / area) +
-  fraction-of-active-cells curve.
+- **Tracking** – tracked cell identities and motion diagnostics (tracking method only).
+- **Statistics** – selectable metric tables and plots, including peak dynamics,
+  tissue-level summaries, active-cell fraction, and regional comparisons.
 - **Downloads** – raw/ΔF/F0/metrics/network CSVs and the overlay GIF.
 
 ## Files
