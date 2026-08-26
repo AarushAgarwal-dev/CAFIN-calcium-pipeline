@@ -241,6 +241,23 @@ def _gif_frame_ids(frame_ids, max_frames=240):
     return [ids[i] for i in np.unique(picks)]
 
 
+def _activity_map(mask, values_by_label, vmin, vmax, cmap="magma"):
+    """Paint each labelled cell in `mask` with its scalar value (e.g. ΔF/F0i at one frame)
+    through a matplotlib colormap. Background (off-cell) is black. Returns uint8 RGB."""
+    mask = np.asarray(mask)
+    max_label = int(mask.max())
+    lut = np.full(max_label + 1, np.nan, dtype=float)
+    for lab, v in values_by_label.items():
+        if 0 < int(lab) <= max_label:
+            lut[int(lab)] = float(v)
+    val_img = lut[mask]                                    # (H,W) per-pixel cell value; NaN off-cell
+    span = (vmax - vmin) if vmax > vmin else 1.0
+    normed = np.clip((val_img - vmin) / span, 0.0, 1.0)
+    rgb = (plt.get_cmap(cmap)(np.nan_to_num(normed))[..., :3] * 255).astype(np.uint8)
+    rgb[np.isnan(val_img)] = 0                             # background black
+    return rgb
+
+
 def _gif_bytes(images, duration_s):
     """Encode GIF bytes in memory so downloads work on Windows and macOS."""
     frames = [_as_rgb8(im) for im in images]
@@ -474,13 +491,10 @@ with st.sidebar.expander("Advanced parameters", expanded=False):
     diameter = st.number_input("Cellpose cell diameter (px)", 5, 60, 15)
     frame_step = st.number_input("Process every Nth frame (speed)", 1, 20, 1)
     max_frames = st.number_input("Max frames (0 = all)", 0, 2000, 0)
-    do_bg = st.checkbox("Background subtraction (auto regions)", value=False)
-    dff_method = st.selectbox("Baseline for F0i", ["percell", "min", "lowest", "first", "last"],
-                              index=0,
-                              help="percell: each cell uses its own lowest frames. "
-                                   "min: that cell's single lowest value. "
-                                   "lowest/first/last: one shared window for every cell.")
-    f0_floor = st.number_input("F0i floor (avoid divide-by-tiny)", 0.1, 100.0, 1.0)
+    do_bg = st.checkbox("Background subtraction (auto regions)", value=True)
+    # ΔF/F0i normalization is controlled in the Traces / ΔF/F0i tab (post-run) so it can be
+    # re-applied without re-running the pipeline. These are the initial defaults for the first run.
+    dff_method, f0_floor = "percell", 1.0
     peak_thr = st.number_input("Peak threshold (ΔF/F0i)", 0.0, 5.0, 0.5, 0.1)
 
 roi_on = st.sidebar.checkbox("Restrict analysis to a region of interest (ROI)", value=False,
@@ -688,10 +702,14 @@ _names = [TAB_REG, TAB_SEG, TAB_ROI, TAB_TRC, TAB_STA, TAB_CLU, TAB_NET]
 if R["handling"] == "tracking":                    # only present when tracking was used
     _names.append(TAB_TRK)
 _names.append(TAB_DL)
-T = dict(zip(_names, st.tabs(_names)))
+# Persist the active panel across reruns. st.tabs() snaps back to the first tab whenever any
+# widget or button triggers st.rerun(); a keyed selector keeps the user on their chosen panel.
+if ss.get("active_tab") not in _names:
+    ss["active_tab"] = _names[0]
+_active = st.radio("Panel", _names, horizontal=True, label_visibility="collapsed", key="active_tab")
 
 # ---------------------------------------------------------- Registration + movie
-with T[TAB_REG]:
+if _active == TAB_REG:
     st.subheader("Overlay  (green = frame 0, magenta = moving, white = aligned)")
     fr = [f for f in frames if f != 0] or frames
     n = len(fr)
@@ -729,7 +747,7 @@ with T[TAB_REG]:
     frame_loop("reg", ridx, rplay, rspeed, n)
 
 # ---------------------------------------------------------- Segmentation
-with T[TAB_SEG]:
+if _active == TAB_SEG:
     st.subheader(f"Cellpose segmentation — {int(mask0.max())} cells")
     mc1, mc2 = st.columns(2)
     mc1.image(cc.numbered_mask_overlay(reg["reg_mem"][0], mask0),
@@ -765,7 +783,7 @@ with T[TAB_SEG]:
     frame_loop("seg", sfi, splay, sspd, len(frames))
 
 # ---------------------------------------------------------- ROI tab
-with T[TAB_ROI]:
+if _active == TAB_ROI:
     # ---- set or change the ROI now, without re-running the pipeline ----
     with st.expander("✏️  Select or change the ROI", expanded=not R.get("roi_box")):
         st.caption("Drag a rectangle to set the ROI. This re-filters the traces that were already "
@@ -825,15 +843,54 @@ with T[TAB_ROI]:
                 "region; the traces are already extracted, so it applies straight away.")
 
 # ---------------------------------------------------------- Traces
+def _trace_panel(ax, fdf, xcol, all_cols, shown, layers, base_rows, frames, tf,
+                 median_color, ylabel, title):
+    """Readable trace panel: 10–90% / IQR bands, sampled coloured cells, population median,
+    optional baseline shading, current-frame marker, and a robust y-axis clip."""
+    x = fdf[xcol].to_numpy()
+    M = fdf[all_cols].to_numpy(float) if all_cols else np.empty((len(x), 0))
+    if "Percentile bands" in layers and M.shape[1] > 1:
+        p10, p25, p75, p90 = (np.nanpercentile(M, q, axis=1) for q in (10, 25, 75, 90))
+        ax.fill_between(x, p10, p90, color="#9ecae1", alpha=0.30, lw=0, label="10–90%")
+        ax.fill_between(x, p25, p75, color="#4C72B0", alpha=0.32, lw=0, label="IQR (25–75%)")
+    if "Individual cells" in layers and shown:
+        colors = plt.cm.turbo(np.linspace(0.05, 0.95, len(shown)))
+        for c, cn in zip(colors, shown):
+            ax.plot(x, fdf[cn], color=c, lw=0.7, alpha=0.55)
+    if "Population median" in layers and M.shape[1]:
+        ax.plot(x, np.nanmedian(M, axis=1), lw=2.4, color=median_color, label="population median")
+    if "Baseline window" in layers:
+        for r in base_rows:
+            if r < len(frames):
+                ax.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
+    if "Current-frame marker" in layers:
+        ax.axvline(tf, color="0.25", lw=1.4, alpha=0.85)
+    if "Clip y-axis (robust)" in layers and M.size:
+        cap = float(np.nanpercentile(M, 97)); lo = min(0.0, float(np.nanpercentile(M, 1)))
+        if cap > lo:
+            ax.set_ylim(lo, cap)
+            n_over = int((np.nanmax(M, axis=0) > cap).sum())
+            if n_over:
+                ax.text(0.99, 0.02, f"{n_over}/{M.shape[1]} cells peak above {cap:g}",
+                        transform=ax.transAxes, ha="right", va="bottom", fontsize=6.5, color="0.5")
+    ax.set_xlabel("Frame"); ax.set_ylabel(ylabel); ax.set_title(title, fontsize=10)
+    ax.legend(fontsize=6.5, frameon=False); ax.grid(alpha=0.25)
+    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+
+
 def render_traces(df, sfx):
     cells = [c for c in df.columns if c.startswith("Cell_")]
     st.subheader(f"Traces before and after normalization ({len(cells)} cells)")
     trace_layers = st.multiselect(
         "Choose what to show in trace plots",
-        ["Individual cells", "Population mean", "Current-frame marker", "Baseline window"],
-        default=["Individual cells", "Population mean", "Current-frame marker", "Baseline window"],
+        ["Individual cells", "Percentile bands", "Population median", "Current-frame marker",
+         "Baseline window", "Clip y-axis (robust)"],
+        default=["Individual cells", "Percentile bands", "Population median", "Current-frame marker",
+                 "Baseline window", "Clip y-axis (robust)"],
         key="trace_layers" + sfx,
-        help="These controls change only the display, not the analysis or saved data.")
+        help="Display only — does not change the analysis or saved data. Percentile bands show the "
+             "10–90% and IQR (25–75%) spread across all cells; clip caps the y-axis at the 97th "
+             "percentile so a few very bright cells don't squash the plot.")
     shown_cells = st.multiselect(
         "Individual cells to display",
         cells, default=cells[:min(50, len(cells))], key="trace_cells" + sfx,
@@ -860,39 +917,14 @@ def render_traces(df, sfx):
     p1, p2 = st.columns(2)
     with p1:
         fig0, ax0 = plt.subplots(figsize=(6, 3.6))
-        if "Individual cells" in trace_layers:
-            for cn in [c for c in shown_cells if c in raw_cols]:
-                ax0.plot(raw_sub["Frame"], raw_sub[cn], lw=0.65, alpha=0.35)
-        if "Population mean" in trace_layers:
-            ax0.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=2, color="black",
-                     label="population mean")
-        if "Baseline window" in trace_layers:
-            for r in base_rows:
-                if r < len(frames):
-                    ax0.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
-        if "Current-frame marker" in trace_layers:
-            ax0.axvline(tf, color="crimson", lw=1.4, alpha=0.85)
-        ax0.set_xlabel("Frame"); ax0.set_ylabel("raw intensity (a.u.)")
-        ax0.set_title("BEFORE normalization (raw)", fontsize=10)
-        ax0.legend(fontsize=7); ax0.grid(alpha=0.3)
+        _trace_panel(ax0, raw_sub, "Frame", raw_cols,
+                     [c for c in shown_cells if c in raw_cols], trace_layers, base_rows, frames, tf,
+                     "black", "raw intensity (a.u.)", "BEFORE normalization (raw)")
         st.pyplot(fig0)
     with p2:
         fig, ax = plt.subplots(figsize=(6, 3.6))
-        if "Individual cells" in trace_layers:
-            for cn in shown_cells:
-                ax.plot(df["Frame"], df[cn], lw=0.65, alpha=0.35)
-        if "Population mean" in trace_layers:
-            ax.plot(df["Frame"], df[cells].mean(axis=1), lw=2, color="crimson",
-                    label="population mean")
-        if "Baseline window" in trace_layers:
-            for r in base_rows:
-                if r < len(frames):
-                    ax.axvspan(frames[r] - 0.5, frames[r] + 0.5, color="gold", alpha=0.18)
-        if "Current-frame marker" in trace_layers:
-            ax.axvline(tf, color="black", lw=1.4, alpha=0.85)
-        ax.set_xlabel("Frame"); ax.set_ylabel("ΔF/F0i")
-        ax.set_title("AFTER normalization (ΔF/F0i)", fontsize=10)
-        ax.legend(fontsize=7); ax.grid(alpha=0.3)
+        _trace_panel(ax, df, "Frame", cells, shown_cells, trace_layers, base_rows, frames, tf,
+                     "crimson", "ΔF/F0i", "AFTER normalization (ΔF/F0i)")
         st.pyplot(fig)
     if base_rows:
         st.caption(f"Gold band = the {len(base_rows)} shared baseline frames (method: {_meth}). "
@@ -919,11 +951,11 @@ def render_traces(df, sfx):
                                 color="dimgray")
                 for _cell in display_cells:
                     dff_ax.plot(df["Frame"], df[_cell], lw=0.55, alpha=0.28, color="steelblue")
-            if "Population mean" in trace_layers and raw_cols:
-                raw_ax.plot(raw_sub["Frame"], raw_sub[raw_cols].mean(axis=1), lw=1.8,
-                            color="black", label="population mean")
-                dff_ax.plot(df["Frame"], df[cells].mean(axis=1), lw=1.8,
-                            color="crimson", label="population mean")
+            if "Population median" in trace_layers and raw_cols:
+                raw_ax.plot(raw_sub["Frame"], raw_sub[raw_cols].median(axis=1), lw=1.8,
+                            color="black", label="population median")
+                dff_ax.plot(df["Frame"], df[cells].median(axis=1), lw=1.8,
+                            color="crimson", label="population median")
             if "Baseline window" in trace_layers:
                 for _row in base_rows:
                     if _row < len(frames):
@@ -937,7 +969,7 @@ def render_traces(df, sfx):
             dff_ax.set(title="ΔF/F0i", xlabel="Frame", ylabel="ΔF/F0i")
             for axis in (raw_ax, dff_ax):
                 axis.grid(alpha=0.25)
-                if "Population mean" in trace_layers:
+                if "Population median" in trace_layers:
                     axis.legend(fontsize=7)
             if show_heatmap:
                 heat_ax = axes[2]
@@ -1088,7 +1120,75 @@ def render_traces(df, sfx):
     frame_loop("trc" + sfx, tfi, tplay, tspd, len(frames))
 
 
-with T[TAB_TRC]:
+if _active == TAB_TRC:
+    # --- Normalization (ΔF/F0i): applied on demand to the extracted traces, without
+    #     re-running registration/segmentation. Updates every downstream tab on rerun. ---
+    with st.container(border=True):
+        st.markdown("**Normalization (ΔF/F0i)** — re-apply to the extracted cell traces "
+                    "without re-running registration or segmentation.")
+        _NORM_METHODS = ["percell", "min", "lowest", "first", "last"]
+        _nb = int(min(10, max(3, len(frames) // 3)))       # baseline frames used by f0_per_cell
+        _NORM_LABELS = {
+            "percell": f"average of the lowest {_nb} frames  (per-cell)",
+            "min":     "single lowest value = 1 frame  (per-cell)",
+            "lowest":  f"lowest {_nb} frames of population mean  (all cells)",
+            "first":   f"first {_nb} frames  (all cells)",
+            "last":    f"last {_nb} frames  (all cells)",
+        }
+        _cur_meth = R.get("dff_method", "percell")
+        _cur_floor = float(R.get("f0_floor", 1.0))
+        _nc1, _nc2 = st.columns(2)
+        _sel_meth = _nc1.selectbox(
+            "Baseline for F0i", _NORM_METHODS,
+            index=_NORM_METHODS.index(_cur_meth) if _cur_meth in _NORM_METHODS else 0,
+            format_func=lambda m: _NORM_LABELS.get(m, m),
+            key="trc_norm_method",
+            help="(per-cell): each cell uses its OWN baseline frames. "
+                 "(all cells): one SHARED window of frames for every cell. "
+                 "In all cases ΔF/F0i = (F − F0i) / F0i is computed per cell. "
+                 "Fewer baseline frames give a smaller, noisier F0i and therefore LARGER ΔF/F0i — "
+                 "'min' (1 frame) over-inflates the signal, so 'percell' is the robust default.")
+        _sel_floor = _nc2.number_input("F0i floor (avoid divide-by-tiny)", 0.1, 100.0, _cur_floor,
+                                       key="trc_norm_floor")
+        if st.button("▶  Normalize (ΔF/F0i)", key="trc_norm_btn", type="primary"):
+            _dff, _base, _f0i = cc.compute_dff0(raw_df, method=_sel_meth, floor=_sel_floor,
+                                                return_f0=True)
+            R["dff"], R["base"], R["f0i"] = _dff, _base, _f0i
+            R["dff_method"], R["f0_floor"] = _sel_meth, _sel_floor
+            ss["res"] = R
+            st.rerun()
+        st.caption(f"Currently applied: **{_NORM_LABELS.get(_cur_meth, _cur_meth)}**, "
+                   f"floor = **{_cur_floor:g}**. "
+                   "Adjust the settings and click Normalize to re-apply to all cells and refresh the "
+                   "headline metrics, Statistics, Clustering, and Network tabs.")
+    # --- Cell activity map: ΔF/F0i painted on the segmentation mask; browse frames + save GIF ---
+    with st.container(border=True):
+        st.markdown("**Cell activity map** — normalized intensity (ΔF/F0i) painted on the cell mask; "
+                    "browse the frames and save a GIF.")
+        _am_cells = [c for c in dff_all.columns if c.startswith("Cell_")]
+        _am_vals = dff_all[_am_cells].to_numpy(float)                 # (frames, cells)
+        _am_labels = [int(c.split("_")[1]) for c in _am_cells]
+        _am_top = float(max(0.2, np.nanmax(_am_vals))) if _am_vals.size else 1.0
+        _am_hi = float(np.nanpercentile(_am_vals, 98)) if _am_vals.size else 1.0
+        _am_smax = round(_am_top, 1)
+        _am_vmax = st.slider("Colour-scale max (ΔF/F0i)", 0.1, _am_smax,
+                             round(min(max(0.1, _am_hi), _am_smax), 2), key="am_vmax",
+                             help="Cap the colour scale so a few very bright cells don't wash out the map.")
+        def _am_vals_at(row):
+            return {lab: _am_vals[row, j] for j, lab in enumerate(_am_labels)}
+        _am_fi, _am_play, _am_spd = frame_controls("actmap", len(frames))
+        _am_frame = frames[_am_fi]
+        st.image(_activity_map(mask0, _am_vals_at(_am_fi), 0.0, _am_vmax),
+                 caption=f"ΔF/F0i — frame {_am_frame}   (magma: black = 0, brightest = {_am_vmax:g})",
+                 width="stretch")
+        def _actmap_gif_frames():
+            movie = []
+            for _row in _gif_frame_ids(list(range(len(frames)))):
+                movie.append(_label_gif_frame(
+                    _activity_map(mask0, _am_vals_at(_row), 0.0, _am_vmax), f"Frame {frames[_row]}"))
+            return movie
+        gif_download_control("actmap", "cafin_activity_map.gif", _actmap_gif_frames, _am_spd)
+        frame_loop("actmap", _am_fi, _am_play, _am_spd, len(frames))
     roi_split(render_traces, "trc")
 
 # ---------------------------------------------------------- Clustering
@@ -1461,12 +1561,11 @@ def render_clustering(df, sfx):
             st.write("Full time-series payload:"); st.json(full_payload)
 
 
-with T[TAB_CLU]:
+if _active == TAB_CLU:
     roi_split(render_clustering, "clu")
 
 # ---------------------------------------------------------- Tracking
-if TAB_TRK in T:
-  with T[TAB_TRK]:
+if _active == TAB_TRK:
     if R["handling"] == "tracking":
         link = R.get("link")
         if link and R.get("tstats"):
@@ -1532,7 +1631,27 @@ if TAB_TRK in T:
 
 # ---------------------------------------------------------- Statistics
 def render_stats(df, sfx):
-    st_, dist_ = cc.metrics(df, threshold=peak_thr)
+    # choose whether these statistics run on the normalized (ΔF/F0i) or the raw traces
+    _data_choice = st.radio(
+        "Data for statistics", ["Normalized (ΔF/F0i)", "Raw fluorescence"],
+        horizontal=True, key="stat_data" + sfx,
+        help="Normalized: peaks and metrics use ΔF/F0i (threshold is a fraction of baseline; "
+             "recommended). Raw: use the un-normalized mean fluorescence per cell (threshold is "
+             "in intensity units).")
+    _raw_mode = _data_choice.startswith("Raw")
+    if _raw_mode:
+        sdf = raw_df[list(df.columns)]                       # same cells, raw intensity
+        _cellcols = [c for c in sdf.columns if c.startswith("Cell_")]
+        _dflt = float(np.round(np.nanpercentile(sdf[_cellcols].to_numpy(float), 75), 1)) if _cellcols else 1.0
+        thr = st.number_input("Peak threshold (raw intensity)", 0.0, 65535.0, _dflt, key="stat_rawthr" + sfx,
+                              help="Minimum raw fluorescence for a peak. Default = 75th percentile of the data.")
+        _amp_unit, _thr_unit = "raw intensity", "raw"
+        st.caption("Statistics below run on raw fluorescence; amplitude, A.U.C. and the "
+                   "'peak ΔF/F0i' tissue metrics are therefore in raw intensity units.")
+    else:
+        sdf, thr, _amp_unit, _thr_unit = df, peak_thr, r"$\Delta$F/F$_0$", "ΔF/F0i"
+
+    st_, dist_ = cc.metrics(sdf, threshold=thr)
 
     stat_sections = st.multiselect(
         "Choose statistical results to display",
@@ -1545,13 +1664,13 @@ def render_stats(df, sfx):
     # ---------- per-cell peak dynamics, one point per cell ----------
     fi = st.number_input("Frame interval (minutes per frame; leave at 1 to report in frames)",
                          0.001, 60.0, 1.0, step=0.1, key="fint" + sfx)
-    feats = cc.peak_features(df, threshold=peak_thr, frame_interval=fi)
+    feats = cc.peak_features(sdf, threshold=thr, frame_interval=fi)
     unit = "min" if abs(fi - 1.0) > 1e-9 else "frames"
     panel_map = {
         "Number of peaks": ("n_peaks", "# peaks", ""),
         "Time to first peak": ("t_first_peak", "1$^{st}$ peak", unit),
         "Area under curve": ("auc", "A.U.C.", ""),
-        "Peak amplitude": ("amplitude", "Amplitude ($\\Delta$F/F$_0$)", ""),
+        "Peak amplitude": ("amplitude", f"Amplitude ({_amp_unit})", ""),
         "Peak width (FWHM)": ("fwhm", "F.W.H.M.", unit),
         "Time between peaks": ("dt_peak", "$\\Delta t_{peak}$", unit),
     }
@@ -1580,7 +1699,7 @@ def render_stats(df, sfx):
                 for sp in ("top", "right"): ax.spines[sp].set_visible(False)
             n_ok = int(feats["n_peaks"].gt(0).sum())
             fig.suptitle(f"{len(feats)} cells ({n_ok} with a detected peak; "
-                         f"threshold {peak_thr} ΔF/F0i)", fontsize=10)
+                         f"threshold {thr:g} {_thr_unit})", fontsize=10)
             fig.tight_layout(); st.pyplot(fig)
         show_feature_table = st.checkbox("Show per-cell feature table", False,
                                          key="stat_table" + sfx)
@@ -1601,15 +1720,15 @@ def render_stats(df, sfx):
 
     if "Active-cell fraction" in stat_sections:
         st.subheader("Fraction of cells above threshold, per frame")
-        cells = [c for c in df.columns if c.startswith("Cell_")]
-        frac = (df[cells].to_numpy(float) > peak_thr).mean(axis=1)
+        cells = [c for c in sdf.columns if c.startswith("Cell_")]
+        frac = (sdf[cells].to_numpy(float) > thr).mean(axis=1)
         fig3, ax3 = plt.subplots(figsize=(11, 3.5))
-        ax3.plot(df["Frame"], frac, "-o", ms=3)
+        ax3.plot(sdf["Frame"], frac, "-o", ms=3)
         ax3.set_ylim(0, 1); ax3.set_xlabel("Frame"); ax3.set_ylabel("fraction active")
         ax3.grid(alpha=0.3); st.pyplot(fig3)
 
 
-with T[TAB_STA]:
+if _active == TAB_STA:
     roi_split(render_stats, "sta")
 
 # ---------------------------------------------------------- Network Analysis
@@ -2052,11 +2171,11 @@ def render_cell_network(df, sfx):
                        "network_summary.csv", "text/csv", key="dl_cellnet_summary" + sfx)
 
 
-with T[TAB_NET]:
+if _active == TAB_NET:
     roi_split(render_cell_network, "net")
 
 # ---------------------------------------------------------- Downloads
-with T[TAB_DL]:
+if _active == TAB_DL:
     # ------------------------------------------------ save straight to a folder
     st.subheader("Save results to a folder")
     if "save_dir" not in ss:

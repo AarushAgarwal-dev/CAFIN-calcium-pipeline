@@ -33,10 +33,21 @@ def count_frames(folder, base):
     return len([f for f in os.listdir(folder) if f.startswith(base) and f.endswith(".tif")])
 
 
+def _to_gray(a):
+    """Collapse a colorized/RGB(A) frame to single-channel intensity via the per-pixel
+    max across colour channels. Microscopy exports often store one real channel under a
+    colour LUT (e.g. membrane in red, calcium in green); the max recovers that intensity.
+    2-D frames and multi-page stacks (last axis not 3/4) pass through unchanged."""
+    a = np.asarray(a)
+    if a.ndim == 3 and a.shape[-1] in (3, 4):
+        a = a[..., :3].max(axis=-1)
+    return a
+
+
 def stretch8(img, lo=1, hi=99, clahe=False):
     """Percentile-stretch to 8-bit. If clahe=True, also apply CLAHE (local adaptive
     contrast) so faint membrane boundaries stay visible in the overlay."""
-    img = img.astype(np.float32)
+    img = _to_gray(img).astype(np.float32)
     p_lo, p_hi = np.percentile(img, [lo, hi])
     p_hi = p_hi if p_hi > p_lo else p_lo + 1
     out = (np.clip((img - p_lo) / (p_hi - p_lo), 0, 1) * 255).astype(np.uint8)
@@ -198,7 +209,7 @@ def register_series(memf, caf, mem_base, ca_base, num_frames, method,
 
     def rd(folder, base, i):
         p = os.path.join(folder, f"{base}{i:04d}.tif")
-        return skio.imread(p) if os.path.exists(p) else None
+        return _to_gray(skio.imread(p)) if os.path.exists(p) else None
 
     fixed_mem = rd(memf, mem_base, 0)
     fixed_ca = rd(caf, ca_base, 0)
