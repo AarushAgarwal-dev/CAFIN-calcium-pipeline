@@ -468,7 +468,8 @@ else:   # Cell tracking — exactly the wound-closure pipeline (segment -> clean
         _maxd = st.number_input("Max centroid distance (px)", 5, 400, 50)
         _minov = st.number_input("Min pixel overlap", 1, 5000, 50)
         _miniou = st.number_input("Min IoU", 0.0, 1.0, 0.1, 0.05)
-        _startf = st.number_input("Reference frame index", 0, 5000, 0)
+        _startf = st.number_input("Reference processed-frame position (0 = first)",
+                                 0, 5000, 0)
         _wov = st.number_input("weight — overlap", 0.0, 1.0, 0.5, 0.05)
         _wsz = st.number_input("weight — size", 0.0, 1.0, 0.3, 0.05)
         _wce = st.number_input("weight — centroid", 0.0, 1.0, 0.2, 0.05)
@@ -477,8 +478,12 @@ else:   # Cell tracking — exactly the wound-closure pipeline (segment -> clean
                          track_min_iou=float(_miniou), track_start_frame=int(_startf),
                          track_w_overlap=float(_wov), track_w_size=float(_wsz),
                          track_w_centroid=float(_wce))
-    st.sidebar.warning("Segments EVERY frame with Cellpose → slow on CPU. "
-                       "Use **frame-step** below to subsample long series.")
+    st.sidebar.warning("Cellpose segmentation can be slow on CPU. "
+                       "Frame skipping is faster but weakens identity matching; "
+                       "use every frame when validating cell movement.")
+    st.sidebar.caption("This mode does not register tissue before matching cells. "
+                       "Large motion or deformation can break cell identities; "
+                       "inspect numeric IDs before using single-cell results.")
 
 # --- GPU / CUDA ---
 cuda_ok, cuda_msg, gpu_backend = cc.gpu_status()
@@ -489,13 +494,24 @@ use_gpu = st.sidebar.checkbox("Use GPU for segmentation", value=cuda_ok,
 
 with st.sidebar.expander("Advanced parameters", expanded=False):
     diameter = st.number_input("Cellpose cell diameter (px)", 5, 60, 15)
-    frame_step = st.number_input("Process every Nth frame (speed)", 1, 20, 1)
+    if link_tracking:
+        frame_step = 1
+        st.caption("Cell tracking uses every frame to preserve temporal identity checks.")
+    else:
+        frame_step = st.number_input("Process every Nth frame (speed)", 1, 20, 1)
     max_frames = st.number_input("Max frames (0 = all)", 0, 2000, 0)
     do_bg = st.checkbox("Background subtraction (auto regions)", value=True)
     # ΔF/F0i normalization is controlled in the Traces / ΔF/F0i tab (post-run) so it can be
     # re-applied without re-running the pipeline. These are the initial defaults for the first run.
     dff_method, f0_floor = "percell", 1.0
     peak_thr = st.number_input("Peak threshold (ΔF/F0i)", 0.0, 5.0, 0.5, 0.1)
+
+if link_tracking and ok_data:
+    selected_count = len(range(0, n_frames if max_frames == 0 else min(max_frames, n_frames),
+                               int(frame_step)))
+    if selected_count < 3:
+        st.sidebar.warning(f"Only {selected_count} frame(s) will be analyzed. A longer "
+                           "sequence is needed to review an individual cell's movement.")
 
 roi_on = st.sidebar.checkbox("Restrict analysis to a region of interest (ROI)", value=False,
                              help="Draw a rectangle below; cells intersecting it are analyzed.")
@@ -613,11 +629,12 @@ if run:
             st.write(f"Linking cells across frames ({TP.track_method}, gap≤{TP.track_gap_frames})…")
             tracked, tsummary, tstats = ctk.run(masks, TP, frame_idx=frames,
                                                 progress=lambda f, m: prog.progress(0.8 + min(0.18 * f, 0.18), text=m))
-            ref = int(np.clip(TP.track_start_frame, 0, len(frames) - 1))
-            mask0 = tracked[ref]
+            # The GUI uses mask0 with frame-0 imagery throughout segmentation,
+            # ROI selection, and exports. Track seeding may use another frame.
+            mask0 = tracked[0]
             reg["mask_per_frame"] = {f: tracked[k] for k, f in enumerate(frames)}
             ca_by_frame = {f: reg["reg_ca"][f] for f in frames if f in reg["reg_ca"]}
-            st.write(f"→ {tstats['n_tracks']} tracks ({tstats['full_coverage']} full-coverage). "
+            st.write(f"→ {tstats['n_tracks']} tracks ({tstats['full_coverage']} present in every processed frame). "
                      f"Extracting ΔF/F0i …")
             raw_df = cc.extract_tracked_traces(reg["mask_per_frame"], ca_by_frame, frames, bg=do_bg)
             eff_handling = "tracking"
@@ -1570,12 +1587,19 @@ if _active == TAB_TRK:
         link = R.get("link")
         if link and R.get("tstats"):
             ts = R["tstats"]
-            m0, m1, m2 = st.columns(3)
+            m0, m1, m2, m3 = st.columns(4)
             m0.metric("Tracks", ts["n_tracks"])
-            m1.metric("Full-coverage tracks", ts["full_coverage"])
-            m2.metric("New cells appeared", ts["n_new"])
-            st.caption("Segment-every-frame + link (Hungarian matching + gap closing). Each color = "
-                       "one stable global cell id; consistent color across frames = a followed cell.")
+            m1.metric("Tracks in every processed frame", ts["full_coverage"])
+            m2.metric("New track IDs", ts["n_new"])
+            m3.metric("Gap-closed links", ts.get("n_gap_links", 0))
+            st.caption("Segment-every-frame linking (Hungarian matching + gap closing). "
+                       "Colors repeat after 20 IDs. Use the ID inspector below to review a cell's "
+                       "mask and centroid trail across frames. Gap-closed identities are provisional "
+                       "and need manual inspection.")
+            if ts.get("gap_links"):
+                with st.expander("Review provisional gap links"):
+                    st.dataframe(pd.DataFrame(ts["gap_links"]), hide_index=True,
+                                 use_container_width=True)
         st.subheader("Cell tracking — stable IDs across frames" if link
                      else "Cell tracking — mask follows tissue deformation")
         memsrc = reg["reg_mem"] if link else reg["raw_mem"]
@@ -1606,13 +1630,68 @@ if _active == TAB_TRK:
         left_panel, right_panel = _tracking_panels(ftrk)
         a, b = st.columns(2)
         if link:
-            a.image(left_panel, caption=f"Tracked cells on frame {ftrk} (color = global id)",
+            a.image(left_panel, caption=f"Tracked cells on frame {ftrk} (colors repeat every 20 IDs)",
                     width="stretch")
             b.image(right_panel, caption=f"Tracked boundaries on frame {ftrk}", width="stretch")
         else:
             a.image(left_panel, caption=f"TRACKED mask on frame {ftrk} (green)", width="stretch")
             b.image(right_panel, caption=f"STATIC frame-0 mask on frame {ftrk} (orange)",
                     width="stretch")
+
+        if link:
+            all_track_ids = sorted({int(cell_id)
+                                    for frame_no in frames
+                                    for cell_id in np.unique(reg["mask_per_frame"][frame_no])
+                                    if cell_id > 0})
+            if all_track_ids:
+                st.markdown("#### Inspect one cell ID")
+                inspect_id = st.selectbox("Track ID", all_track_ids, key="inspect_track_id")
+                positions = []
+                position_rows = []
+                for position, frame_no in enumerate(frames):
+                    yy, xx = np.where(reg["mask_per_frame"][frame_no] == inspect_id)
+                    if xx.size:
+                        x, y = float(xx.mean()), float(yy.mean())
+                        positions.append((position, frame_no, x, y))
+                        position_rows.append({"Frame": int(frame_no), "X": round(x, 1),
+                                              "Y": round(y, 1)})
+                    else:
+                        position_rows.append({"Frame": int(frame_no), "X": None, "Y": None})
+
+                current_mask = reg["mask_per_frame"][ftrk] == inspect_id
+                base = cc.stretch8(reg["raw_mem"][ftrk], clahe=True)
+                highlighted = np.dstack([base] * 3)
+                if current_mask.any():
+                    highlighted[current_mask] = (
+                        0.35 * highlighted[current_mask] + 0.65 * np.array([255, 60, 45])
+                    ).astype(np.uint8)
+                    highlighted[find_boundaries(current_mask, mode="outer")] = [255, 235, 0]
+                image = Image.fromarray(highlighted)
+                draw = ImageDraw.Draw(image)
+                previous = None
+                for position, frame_no, x, y in positions:
+                    if position > tidx:
+                        break
+                    point = (int(round(x)), int(round(y)))
+                    if previous is not None and position == previous[0] + 1:
+                        draw.line([previous[1], point], fill=(0, 255, 255), width=2)
+                    marker = (255, 70, 45) if frame_no == ftrk else (0, 255, 255)
+                    draw.ellipse((point[0] - 3, point[1] - 3,
+                                  point[0] + 3, point[1] + 3), fill=marker)
+                    draw.text((point[0] + 5, point[1] + 4), str(frame_no), fill=marker)
+                    previous = (position, point)
+
+                st.image(image, caption=(f"Track {inspect_id}: red = selected cell at frame {ftrk}; "
+                                         "cyan = earlier centroids; numbers = source frames"),
+                         use_container_width=True)
+                if not current_mask.any():
+                    st.info(f"Track {inspect_id} is absent from frame {ftrk}. "
+                            "Missing frames appear as blank coordinates below.")
+                st.caption(f"Detected in {len(positions)} of {len(frames)} processed frames. "
+                           "Review the raw cell outline and path before interpreting its movement.")
+                with st.expander("Centroid positions by frame"):
+                    st.dataframe(pd.DataFrame(position_rows), hide_index=True,
+                                 use_container_width=True)
 
         def _tracking_gif_frames():
             movie = []

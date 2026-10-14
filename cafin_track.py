@@ -34,7 +34,7 @@ class TrackParams:
     track_pixel_threshold: int = 50       # min absolute pixel overlap to accept
     track_max_distance_px: int = 50       # max centroid-centroid distance
     track_start_frame: int = 0            # reference frame; tracks fwd + bwd
-    track_gap_frames: int = 2             # close gaps up to this many frames
+    track_gap_frames: int = 2             # maximum missing source frames
     track_w_overlap: float = 0.5          # score weights (sum to 1)
     track_w_size: float = 0.3
     track_w_centroid: float = 0.2
@@ -138,19 +138,30 @@ def unified_tracking(masks, params, progress=None):
     return tracked, info
 
 
-def close_gaps(tracked, params):
-    """Re-link track fragments separated by <= track_gap_frames missing frames."""
+def close_gaps(tracked, params, frame_idx=None, return_links=False):
+    """Re-link mutual-nearest fragments across at most ``gap`` raw frames.
+
+    ``frame_idx`` contains the source movie indices. This matters when the GUI
+    processes every Nth frame: a gap of one processed frame may span many raw
+    frames and should not be treated as a short interruption. Each fragment
+    needs at least two observations before proximity-based relinking is tried.
+    """
     gap = params.track_gap_frames
     if gap <= 0:
-        return tracked
+        return (tracked, []) if return_links else tracked
     n = len(tracked)
+    if frame_idx is None:
+        frame_idx = list(range(n))
+    if len(frame_idx) != n or any(b <= a for a, b in zip(frame_idx, frame_idx[1:])):
+        raise ValueError("frame_idx must contain one increasing source index per mask")
     ids = sorted({int(i) for f in tracked for i in np.unique(f) if i})
-    span, head, tail = {}, {}, {}
+    span, head, tail, n_seen = {}, {}, {}, {}
     for i in ids:
         frames = [t for t in range(n) if np.any(tracked[t] == i)]
         if not frames:
             continue
         span[i] = (frames[0], frames[-1])
+        n_seen[i] = len(frames)
         for store, fr in ((head, frames[0]), (tail, frames[-1])):
             ys, xs = np.where(tracked[fr] == i)
             store[i] = (xs.mean(), ys.mean(), xs.size)
@@ -161,17 +172,17 @@ def close_gaps(tracked, params):
             x = remap[x]
         return x
 
+    candidates = {}
     for a in ids:
-        if a not in span:
+        if a not in span or n_seen[a] < 2:
             continue
         te = span[a][1]
         ax, ay, asz = tail[a]
-        best, bestd = None, 1e9
         for b in ids:
-            if b == a or b not in span:
+            if b == a or b not in span or n_seen[b] < 2:
                 continue
             ts = span[b][0]
-            if not (te < ts <= te + 1 + gap):
+            if ts <= te or frame_idx[ts] - frame_idx[te] - 1 > gap:
                 continue
             bx, by, bsz = head[b]
             d = np.hypot(ax - bx, ay - by)
@@ -179,10 +190,29 @@ def close_gaps(tracked, params):
                 continue
             if min(asz, bsz) / max(asz, bsz) < 0.5:
                 continue
-            if d < bestd:
-                bestd, best = d, b
-        if best is not None and root(best) != root(a):
-            remap[best] = a
+            candidates[(a, b)] = d
+
+    # Both fragments must choose one another. The old loop let two ended
+    # tracks claim the same new fragment; the later iteration silently won.
+    best_head = {}
+    best_tail = {}
+    for (a, b), d in candidates.items():
+        if a not in best_head or (d, b) < best_head[a]:
+            best_head[a] = (d, b)
+        if b not in best_tail or (d, a) < best_tail[b]:
+            best_tail[b] = (d, a)
+    links = []
+    for a in ids:
+        if a not in best_head:
+            continue
+        d, b = best_head[a]
+        if best_tail[b][1] != a or root(b) == root(a):
+            continue
+        remap[b] = a
+        links.append({"from_id": a, "to_id": b,
+                      "last_frame": int(frame_idx[span[a][1]]),
+                      "first_frame": int(frame_idx[span[b][0]]),
+                      "distance_px": float(d)})
 
     if remap:
         for t in range(n):
@@ -191,18 +221,26 @@ def close_gaps(tracked, params):
                 rb = root(b)
                 if rb != b:
                     f[f == b] = rb
-    return tracked
+    return (tracked, links) if return_links else tracked
 
 
 def run(masks, params, frame_idx=None, progress=None):
     """masks: (T,H,W) int array of per-frame independent segmentations.
-    Returns (tracked (T,H,W) uint16 global ids, summary_rows, stats)."""
+    Frames must be consecutive in the original recording. Returns tracked
+    global IDs, summary rows, and stats with provisional gap-link details."""
     masks = np.asarray(masks)
+    if masks.ndim != 3 or masks.shape[0] == 0:
+        raise ValueError("masks must be a nonempty (frames, height, width) stack")
     T = masks.shape[0]
     if frame_idx is None:
         frame_idx = list(range(T))
+    if len(frame_idx) != T or any(b <= a for a, b in zip(frame_idx, frame_idx[1:])):
+        raise ValueError("frame_idx must contain one increasing source index per mask")
+    if any(b - a != 1 for a, b in zip(frame_idx, frame_idx[1:])):
+        raise ValueError("Individual-cell tracking requires consecutive source frames")
     tracked_list, info = unified_tracking([masks[t] for t in range(T)], params, progress)
-    tracked_list = close_gaps(tracked_list, params)
+    tracked_list, gap_links = close_gaps(tracked_list, params, frame_idx, return_links=True)
+    info["gap_links"] = gap_links
     tracked = np.stack(tracked_list).astype(np.uint16)
 
     ids = sorted({int(i) for t in range(T) for i in np.unique(tracked[t]) if i})
@@ -235,5 +273,7 @@ def run(masks, params, frame_idx=None, progress=None):
 
     stats = dict(n_tracks=len(ids),
                  n_new=int(sum(len(v) for v in info["new_cells"].values())),
+                 n_gap_links=len(gap_links),
+                 gap_links=gap_links,
                  full_coverage=int(sum(1 for r in rows if r[4] == 1.0)))
     return tracked, rows, stats

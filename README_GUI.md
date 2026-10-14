@@ -50,7 +50,10 @@ reference mask, **Elastic (itk-elastix)** with a static reference mask, and
 **Cell tracking**, which segments frames separately and links cell identities.
 Tracking is available as its own method; it is not silently combined with the
 registration choices. A static mask follows the paper's reference-frame
-workflow, while tracking is the optional motion-aware alternative.
+workflow, while tracking links independent per-frame masks without first
+registering tissue motion. Tracking processes every source frame; inspect the numeric cell ID in
+the Tracking tab before using a trajectory for a biological claim. Gap-closed
+links are provisional; see [TRACKING_VALIDATION.md](TRACKING_VALIDATION.md).
 
 ## Tabs
 - **Registration overlay** – heavy-contrast green/magenta overlay (green = frame 0,

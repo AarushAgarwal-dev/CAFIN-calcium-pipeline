@@ -66,9 +66,11 @@ The pipeline runs in nine steps.
    separately.
 5. Trace extraction. For each cell, the mean pixel value inside its mask is measured per frame.
    Traces are normalised as ΔF/F0 = (Ft - F0)/F0, where F0 is the mean of the lowest-activity frames.
-6. Cell tracking (optional). Every frame is segmented on its own, then cells are linked into stable
-   IDs. Matching combines an IoU, size, and centroid score with Hungarian assignment, propagates
-   forward and backward from a reference frame, and closes short gaps.
+6. Cell tracking (optional). Every processed frame is segmented on its own, then detections are
+   linked into candidate cell identities. Matching combines an IoU, size, and centroid score with
+   Hungarian assignment and propagates forward and backward from a reference frame. Short gaps
+   are closed conservatively; the Tracking tab shows provisional gap links and lets you inspect
+   one numeric ID across the raw images before interpreting single-cell movement.
 7. Analysis. Per-cell metrics include peak ΔF/F0, transient rate, and per-frame area. The Clustering
    tab can group cells by whole traces, selected peak dynamics (including first-peak time), activity
    features, or cell-to-tissue coupling. It can also cluster frames into tissue-level activity states
@@ -139,7 +141,8 @@ The three methods are:
 
 * Rigid (ECC): global motion correction with a fixed frame-0 mask.
 * Elastic (itk-elastix): non-rigid B-spline correction, at fast, balanced, or accurate quality.
-* Cell tracking: segments every frame and links cells into stable IDs, without registration.
+* Cell tracking: segments consecutive frames and proposes cell IDs, without registration;
+  inspect individual IDs before using them as migration evidence.
 
 
 The tabs cover the registration overlay with frame playback, segmentation, ROI drawing, per-cell
@@ -222,9 +225,12 @@ frames, for example `..._0000.tif`, `..._0001.tif`, and so on.
 If installation or a dataset fails validation, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 Per-frame Cellpose segmentation, used by the tracking method, is slow on CPU, roughly 30 to 60
-seconds per frame. Use the frame-step control to subsample, or run a CUDA build of torch. The
-itk-elastix registration takes about 0.5, 3, or 5 seconds per frame at fast, balanced, or accurate
-quality.
+seconds per frame. Cell tracking requires consecutive source frames because sparse sampling can
+assign a cell's ID to a different cell after the tissue moves. Use **Max frames** to shorten a
+preview; other analysis methods still allow frame skipping. A CUDA build of torch can reduce
+segmentation time. The itk-elastix registration takes about 0.5, 3, or 5 seconds per frame at
+fast, balanced, or accurate quality. See [TRACKING_VALIDATION.md](TRACKING_VALIDATION.md) before
+using tracks as evidence of individual cell migration.
 
 On the statistics: the pooled per-cell p-values treat individual cells as replicates. With only two
 biological trials per condition, the per-trial direction of the effect is the primary evidence.
