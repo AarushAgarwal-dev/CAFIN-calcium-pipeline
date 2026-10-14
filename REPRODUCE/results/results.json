@@ -12,7 +12,7 @@
       "temporal_sync_r": 0.25951063900761073,
       "trial": "trial1",
       "condition": "Baseline",
-      "provenance": "recomputed from raw images"
+      "provenance": "previously recomputed from raw TIFFs (stored CSV)"
     },
     "trial1/AFTERDRUG": {
       "label": "Latrunculin",
@@ -26,7 +26,7 @@
       "temporal_sync_r": 0.5320918438956671,
       "trial": "trial1",
       "condition": "Latrunculin",
-      "provenance": "recomputed from raw images"
+      "provenance": "previously recomputed from raw TIFFs (stored CSV)"
     },
     "trial2/BEFOREDRUG": {
       "label": "Baseline",

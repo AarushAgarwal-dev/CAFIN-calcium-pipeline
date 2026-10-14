@@ -1,16 +1,16 @@
-"""
-run_all.py -- one command to reproduce EVERYTHING end-to-end:
-  0. recompute_from_raw.py  regenerate ΔF/F₀ from the raw LATA1 TIFFs (registration ->
-     Cellpose cyto3 segmentation -> background subtraction -> ΔF/F₀).  SKIPPED if the
-     regenerated/ folder already exists (it is slow; delete it to force a re-run).
-  1. reproduce.py       analysis + quantitative figures + statistics (Shapiro-Wilk -> test choice)
-  2. figures_paper.py   paper-style figures (registration overlays, mask, raster, background, ROI, schematic)
-  3. generate_paper.py  assemble the manuscript (.docx) + PROOF.md
+"""Rebuild the CAFIN analysis and manuscript from the available study data.
 
-Usage:  python run_all.py            (skips step 0 if regenerated/ exists)
-        python run_all.py --recompute  (force the end-to-end recompute first)
+With the distributed processed CSVs, this regenerates the statistics, six
+quantitative figures, DOCX, and PROOF.md. The nine paper-style microscopy PNGs
+are rebuilt only when the original LATA1 TIFFs are available; otherwise every
+required checked-in PNG must be present before the run starts.
+
+Use --recompute to regenerate LATA1 traces from its original raw TIFFs first.
 """
-import runpy, os, sys, shutil
+import glob
+import os
+import runpy
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 try:
@@ -20,23 +20,67 @@ except Exception:
 
 force = "--recompute" in sys.argv
 regen = os.path.join(HERE, "regenerated")
-raw_ready = all(os.path.isdir(os.path.join(os.path.dirname(HERE), "LATA1TRAIL", cond, channel))
-                for cond in ("BEFOREDRUG", "AFTERDRUG") for channel in ("membrane", "ca2"))
+root = os.path.dirname(HERE)
+raw_folders = [os.path.join(root, "LATA1TRAIL", cond, channel)
+               for cond in ("BEFOREDRUG", "AFTERDRUG")
+               for channel in ("membrane", "ca2")]
+raw_ready = all(glob.glob(os.path.join(folder, "*.tif")) for folder in raw_folders)
+paper_style_figures = (
+    "figP1_pipeline.png",
+    "figP2_registration_baseline.png",
+    "figP3_registration_afterdrug.png",
+    "figP4_processing_row.png",
+    "figP5_mask_numbered.png",
+    "figP6_raster.png",
+    "figP7_region_bars.png",
+    "figP8_background.png",
+    "figP9_roi.png",
+)
+
 if force and not raw_ready:
-    raise SystemExit("--recompute requires raw LATA1 TIFF folders, which are not distributed "
-                     "on GitHub. Remove --recompute to rebuild the analysis and paper from the "
-                     "included processed data.")
-if force and os.path.isdir(regen):
-    shutil.rmtree(regen, ignore_errors=True)
+    raise SystemExit("--recompute requires .tif frames in all four LATA1TRAIL "
+                     "BEFOREDRUG/AFTERDRUG membrane/ and ca2/ folders. The raw TIFFs "
+                     "are not included in this repository.")
+if not raw_ready:
+    missing_figures = [name for name in paper_style_figures
+                       if not os.path.isfile(os.path.join(HERE, "results", "figures", name))
+                       or not os.path.getsize(os.path.join(HERE, "results", "figures", name))]
+    if missing_figures:
+        raise SystemExit(
+            "Cannot rebuild the manuscript without the original LATA1 TIFFs or all nine "
+            "checked-in paper-style figures. Missing figure(s): "
+            + ", ".join(missing_figures)
+        )
+
+# These flags describe work done by this invocation, not the history of the
+# checked-in CSVs or PNGs. generate_paper.py records them in the manuscript.
+os.environ["CAFIN_RAW_TRACES_RECOMPUTED"] = "0"
+os.environ["CAFIN_IMAGE_FIGURES_REGENERATED"] = "0"
 
 steps = []
-if force or not os.path.isdir(regen):
+regenerated_complete = all(
+    os.path.isfile(os.path.join(regen, "LATA1TRAIL", cond, filename))
+    for cond in ("BEFOREDRUG", "AFTERDRUG")
+    for filename in ("all_cells_normalized.csv", "mask_0.tiff")
+)
+if force or (raw_ready and not regenerated_complete):
     steps.append("recompute_from_raw.py")
 else:
-    print("Skipping recompute_from_raw.py (regenerated/ exists; pass --recompute to force).")
-steps += ["reproduce.py", "figures_paper.py", "generate_paper.py"]
+    print("Using available processed per-cell CSVs; pass --recompute with raw LATA1 TIFFs "
+          "to regenerate the traces.")
+steps.append("reproduce.py")
+if raw_ready:
+    steps.append("figures_paper.py")
+else:
+    print("Original LATA1 TIFFs are unavailable; reusing all nine checked-in "
+          "paper-style figure PNGs.")
+steps.append("generate_paper.py")
 
 for script in steps:
     print(f"\n=========== {script} ===========")
     runpy.run_path(os.path.join(HERE, script), run_name="__main__")
+    if script == "recompute_from_raw.py":
+        os.environ["CAFIN_RAW_TRACES_RECOMPUTED"] = "1"
+    elif script == "figures_paper.py":
+        os.environ["CAFIN_IMAGE_FIGURES_REGENERATED"] = "1"
 print("\nAll done. See CAFIN_reproduced_paper.docx, PROOF.md, and results/figures/.")

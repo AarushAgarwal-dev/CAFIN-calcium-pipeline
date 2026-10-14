@@ -1,40 +1,49 @@
 # CAFIN processed-data reproduction of the calcium-transient study
 
-This folder reproduces the manuscript *"Quantitatively Rapid Analysis of Calcium
-Transients in Epithelial Cell Layer in Vivo upon Cytoskeleton Disruption"* end-to-end,
-**from the pipeline's real data**, and regenerates the paper and all figures automatically.
+This folder rebuilds the quantitative analysis for the draft manuscript
+*"Quantitatively Rapid Analysis of Calcium Transients in Epithelial Cell Layer
+in Vivo upon Cytoskeleton Disruption"* from the study's processed per-cell data.
+It regenerates six quantitative figures, a draft paper, and an evidence report.
+The nine paper-style microscopy figures are regenerated only when the original
+LATA1 TIFFs are available; otherwise the runner reuses their checked-in PNGs.
 
-It does **not** read the original PDF. Every figure and number is computed from the
-per-cell ΔF/F₀ CSVs the pipeline produced for two independent trials
+It does **not** read the original manuscript or PDF. The quantitative results
+come from the per-cell ΔF/F₀ CSVs the pipeline produced for two trials
 (`LATA1TRAIL`, `LATA2TRIAL`), each with a **baseline (BEFOREDRUG)** and a
 **Latrunculin (AFTERDRUG)** recording.
 
 ---
 
-## Rebuild the analysis, figures, and paper in one command
+## Rebuild the available analysis and paper in one command
 
 ```bash
-cd CAFIN_Cleanedup_Code_Aarush/REPRODUCE
-pip install -r requirements.txt          # first time only
+cd CAFIN-calcium-pipeline/REPRODUCE       # use your actual checkout path
+python -m pip install -r requirements.txt # first time only
 
-python run_all.py                         # does all three steps below
+python run_all.py
 ```
 
-`run_all.py` uses the processed per-cell data included in GitHub to rebuild the analysis, figures,
-and paper. The checked-in `regenerated/` provenance is retained. It does not claim to recreate the
-microscopy acquisition or unavailable raw images.
+Without raw TIFFs, `run_all.py` uses the processed CSVs included in GitHub to
+rebuild the statistics, six quantitative figures, the `.docx`, and `PROOF.md`.
+It verifies that all nine previously generated paper-style PNGs are present
+before reusing them. If any is missing, it stops with a list of missing files.
+This mode cannot regenerate those microscopy panels, segmentation masks, or
+the TIFF-to-CSV processing chain. The included PDF is a static snapshot; the
+runner regenerates the `.docx`, not the PDF.
 
-Passing `--recompute` additionally regenerates LATA1 traces from raw TIFFs. This requires the
-original `LATA1TRAIL/BEFOREDRUG/{membrane,ca2}` and `AFTERDRUG/{membrane,ca2}` folders, which are
-too large to distribute through GitHub. The command now stops safely before deleting anything when
-those folders are absent.
+Passing `--recompute` regenerates LATA1 traces and paper-style figures from raw
+TIFFs. This requires `.tif` frames in all four original
+`LATA1TRAIL/{BEFOREDRUG,AFTERDRUG}/{membrane,ca2}` folders, which are not
+distributed through GitHub. The command checks for those frames before starting.
+With raw TIFFs present, install the image-processing dependencies described in
+`../requirements-gui.txt` as well as this folder's requirements.
 
 Or run the steps individually:
 
 ```bash
-python recompute_from_raw.py  # (once) regenerate ΔF/F₀ from raw LATA1 TIFFs, end-to-end
+python recompute_from_raw.py  # requires original LATA1 TIFFs
 python reproduce.py           # analysis + quantitative figures + statistics
-python figures_paper.py       # paper-STYLE figures from the real images
+python figures_paper.py       # requires original LATA1 TIFFs
 python generate_paper.py      # assembles the manuscript (.docx) + PROOF.md
 ```
 
@@ -42,17 +51,18 @@ Outputs land in `REPRODUCE/`:
 
 | File | What it is |
 |---|---|
-| `results/figures/figP1..figP9 .png` | **paper-style** figures: pipeline schematic, green/magenta registration overlays, elastic-vs-rigid comparison, 4-panel processing row, numbered cell mask, **background reference regions**, **ROI selection**, Ca²⁺ event raster, regional ΔF/F₀ bars |
-| `regenerated/LATA1TRAIL/…` | ΔF/F₀ recomputed end-to-end from the raw images (masks, traces, ROI CSVs, provenance) |
+| `results/figures/figP1..figP9*.png` | Nine paper-style figures; reused from the repository when original TIFFs are absent |
+| `regenerated/LATA1TRAIL/…` | Previously recomputed LATA1 traces, centroid/ROI CSVs, and provenance; original raw TIFFs and masks are not included |
 | `results/figures/fig1..fig6 .png` | quantitative figures: traces, heatmaps, metric violins + p-values, spatial coordination, time-dependence |
 | `results/metrics_per_cell.csv` | every cell's metrics (both trials, both conditions) |
 | `results/field_summary.csv` | per-field tissue-level metrics |
 | `results/stats_tests.csv` | Mann–Whitney U tests, p-values, effect sizes |
 | `results/results.json` | machine-readable everything |
-| `CAFIN_reproduced_paper.docx` | the full written paper (13 figures), numbers auto-filled |
+| `CAFIN_reproduced_paper.docx` | draft paper with 15 figures and numbers filled from the current analysis |
+| `CAFIN_reproduced_paper.pdf` | checked-in snapshot, not regenerated by `run_all.py` |
 | `PROOF.md` | claim-by-claim reproduction proof (see below) |
 
-Analyses use a **fixed random seed**, so re-running gives byte-identical numbers.
+The analysis uses a **fixed random seed** for repeatable numerical results.
 (If `CAFIN_reproduced_paper.docx` is open in Word when you re-run, it safely writes
 `CAFIN_reproduced_paper_NEW.docx` instead.)
 
@@ -67,28 +77,31 @@ The manuscript's central claims and how each is quantified here:
 2. **Tissue-level pattern analysis** — active fraction, **spatial heterogeneity**
    (CV of per-cell peak amplitude) and **temporal synchronization**
    (mean pairwise Pearson r among active cells).
-3. **Baseline vs Latrunculin comparison with statistics** — pooled cells across two trials,
-   two-sided **Mann–Whitney U** + rank-biserial effect size (the paper's Methods call for
-   nonparametric testing; this fills that gap).
+3. **Baseline vs Latrunculin comparison with statistics** — Shapiro–Wilk selects
+   Welch's t-test or a two-sided Mann–Whitney U test, with a rank-biserial
+   effect size. Pooled cell-level p-values are descriptive because the two
+   biological trials, not individual cells, are the independent replicates.
 4. **Spatial coordination / propagation** — pairwise correlation vs inter-cell centroid
    distance (Figure 4), the paper's "distinct patterns of Ca²⁺ propagation."
 5. **Time-dependence of the response** — early/mid/late windows within the treated
    recordings (Figure 6).
 
-### Reproduced result (auto-generated numbers)
+### Current processed-data results (pooled cells; descriptive)
 
 | Metric | median baseline | median Latrunculin | p-value |
 |---|---|---|---|
-| Peak ΔF/F₀ | 2.14 | 2.75 | 4.2e-22 |
-| Mean ΔF/F₀ | 0.34 | 0.98 | 1.0e-117 |
-| Transients/frame | 0.097 | 0.156 | 3.5e-140 |
-| Transient AUC | 5.97 | 49.2 | 4.5e-142 |
-| Pairwise correlation r | 0.24 | 0.49 | <1e-300 |
+| Peak ΔF/F₀ | 2.14 | 3.16 | 1.67e-27 |
+| Mean ΔF/F₀ | 0.36 | 1.11 | 3.39e-107 |
+| Transients/frame | 0.097 | 0.178 | 1.04e-173 |
+| Supra-threshold AUC/frame | 0.216 | 0.745 | 6.58e-75 |
+| Pairwise correlation r | 0.244 | 0.491 | <1e-300 |
 
-Spatial heterogeneity **CV rose 0.72 → 1.17** and temporal synchronization
+Spatial heterogeneity **CV rose 0.72 → 1.13** and temporal synchronization
 **r rose 0.25 → 0.45** after actin disruption — matching the abstract's claims of
 *increased spatial heterogeneity* and *altered temporal synchronization*.
-(Numbers above are the values produced on this dataset; `PROOF.md` always shows the live values.)
+These are same-data, same-code results, not an independent replication.
+Peak amplitude decreased in LATA2 despite the pooled increase, so consult the
+per-trial results in `PROOF.md` before interpreting that metric.
 
 ---
 
@@ -99,11 +112,12 @@ Open **`PROOF.md`** (or `CAFIN_reproduced_paper.docx`). `PROOF.md` contains:
 - a table of every field analyzed (cell counts, frames, metrics),
 - the full statistics table (p-values + effect sizes),
 - a **claim-by-claim table** mapping each manuscript claim to the reproduced evidence,
-- all six figures embedded.
+- all 15 available figures linked, including nine reused microscopy PNGs when
+  raw TIFFs are unavailable.
 
-Because `PROOF.md`, the `.docx`, and the CSVs are all generated from `results.json` by
-script, they cannot disagree with the data. Delete `results/` and re-run the two commands
-to regenerate them from scratch.
+The numerical tables in `PROOF.md` and the `.docx` are generated from
+`results.json`. With processed data only, the microscopy PNGs remain the
+previously generated assets. Keep them in `results/figures/` when rerunning.
 
 ---
 
@@ -135,10 +149,11 @@ tracking and statistics tabs.
 
 ## Improvements made in this reproduction
 
-- **End-to-end recompute** — `recompute_from_raw.py` regenerates ΔF/F₀ for LATA1 straight
-  from the raw TIFFs (registration → cyto3 segmentation → background subtraction → ΔF/F₀),
-  so the whole chain is recomputed, not just read from CSVs. LATA2 (no raw TIFFs) uses its
-  existing CSVs; every field's provenance is recorded in `field_summary.csv`.
+- **Optional raw recompute** — when original LATA1 TIFFs are supplied,
+  `recompute_from_raw.py` reruns registration → cyto3 segmentation → background
+  subtraction → ΔF/F₀. The repository includes previously recomputed LATA1
+  CSVs, but not its raw images or masks. LATA2 uses its existing CSVs;
+  `field_summary.csv` records each field's data source.
 - **Statistics matched to the original plan** — Shapiro–Wilk normality test now drives test
   choice (Welch t-test if both groups normal, else Mann–Whitney U); Kruskal–Wallis for R1–R4;
   rank-biserial effect sizes. AUC is per-frame normalized so 31- vs 90-frame recordings compare.
@@ -162,7 +177,7 @@ tracking and statistics tabs.
 
 ```
 REPRODUCE/
-├── run_all.py                 # one command → recompute (once) + analysis + figures + paper
+├── run_all.py                 # processed-data run; optional raw-image recompute
 ├── recompute_from_raw.py      # regenerate ΔF/F₀ from raw LATA1 TIFFs, end-to-end
 ├── reproduce.py               # analysis + quantitative figures + statistics (Shapiro-Wilk)
 ├── figures_paper.py           # paper-style figures from real images
@@ -171,7 +186,7 @@ REPRODUCE/
 ├── README_REPRODUCE.md        # this file
 ├── CAFIN_reproduced_paper.docx
 ├── PROOF.md
-├── regenerated/LATA1TRAIL/…   # end-to-end recomputed masks, traces, ROI CSVs, provenance
+├── regenerated/LATA1TRAIL/…   # prior trace, ROI, centroid CSVs and provenance
 └── results/
     ├── metrics_per_cell.csv  field_summary.csv  stats_tests.csv  results.json
     └── figures/

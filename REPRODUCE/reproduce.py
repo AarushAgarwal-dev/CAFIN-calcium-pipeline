@@ -55,7 +55,7 @@ def _field_dir(trial_dir, cond):
     existing pipeline CSVs. Returns (dir, provenance_string)."""
     regen = os.path.join(REGEN, trial_dir, cond)
     if os.path.exists(os.path.join(regen, "all_cells_normalized.csv")):
-        return regen, "recomputed from raw images"
+        return regen, "previously recomputed from raw TIFFs (stored CSV)"
     return os.path.join(ROOT, trial_dir, cond), "pipeline CSV (raw TIFFs unavailable)"
 
 

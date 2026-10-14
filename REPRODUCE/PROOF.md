@@ -2,12 +2,14 @@
 
 Generated automatically from `results/results.json`; every number below is computed from the pipeline's per-cell ΔF/F₀ outputs. Re-running `reproduce.py` + `generate_paper.py` regenerates this file identically (fixed seed).
 
+The nine paper-style microscopy figures are previously generated assets retained with this repository; the original TIFFs were unavailable in this run. This run used stored LATA1 CSVs previously recomputed from raw TIFFs; it did not rerun registration, segmentation, or fluorescence extraction from raw images.
+
 ## 1. Fields analyzed
 
 | Field | cells | frames | active % | median peak ΔF/F₀ | heterogeneity CV | sync r | provenance |
 |---|---|---|---|---|---|---|---|
-| trial1 Baseline | 484 | 31 | 96.5% | 2.14 | 0.77 | 0.260 | recomputed from raw images |
-| trial1 Latrunculin | 517 | 90 | 100.0% | 5.40 | 0.92 | 0.532 | recomputed from raw images |
+| trial1 Baseline | 484 | 31 | 96.5% | 2.14 | 0.77 | 0.260 | previously recomputed from raw TIFFs (stored CSV) |
+| trial1 Latrunculin | 517 | 90 | 100.0% | 5.40 | 0.92 | 0.532 | previously recomputed from raw TIFFs (stored CSV) |
 | trial2 Baseline | 479 | 31 | 98.3% | 2.14 | 0.68 | 0.241 | pipeline CSV (raw TIFFs unavailable) |
 | trial2 Latrunculin | 452 | 55 | 98.7% | 1.64 | 1.34 | 0.366 | pipeline CSV (raw TIFFs unavailable) |
 
