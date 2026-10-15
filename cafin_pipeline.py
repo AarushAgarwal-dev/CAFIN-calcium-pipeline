@@ -8,7 +8,8 @@ Given a trial folder (with membrane/ and ca2/ tiff stacks) it:
 
 dF/F0 (per user's choice): F and F0 are taken from the RAW (registered,
 NOT background-subtracted) calcium, with a floor on F0, so the dim calcium
-channel does not blow the ratio up.  F0 = mean of the lowest-activity frames.
+channel does not blow the ratio up. Each cell's F0i is the mean of its own
+lowest-intensity frames.
 
 Also returns tissue-level metrics used in the Results:
   amplitude, active fraction, peak frequency, spatial heterogeneity (CV),
@@ -87,7 +88,7 @@ def _segment(raw_dir, out):
 
 
 def _traces_dff0(green_dir, masks, num_frames):
-    """dF/F0 from RAW registered calcium + F0 floor (user's choice)."""
+    """dF/F0i from registered calcium with each cell's own low-frame F0i."""
     ids = np.unique(masks); ids = ids[ids > 0]
     raw = {c: [] for c in ids}
     for f in range(num_frames):
@@ -98,17 +99,15 @@ def _traces_dff0(green_dir, masks, num_frames):
         for c in ids:
             px = ca[masks == c]
             raw[c].append(float(px.mean()) if px.size else np.nan)
-    favg = [np.nanmean([raw[c][f] for c in ids]) for f in range(num_frames)]
-    nb = min(10, max(3, num_frames // 3))
-    base = sorted(sorted(range(num_frames), key=lambda f: favg[f])[:nb])
-    dff = {}
-    for c in ids:
-        f0 = np.nanmean([raw[c][f] for f in base])
-        f0 = max(f0, F0_FLOOR)
-        dff[c] = [(v - f0) / f0 if not np.isnan(v) else np.nan for v in raw[c]]
     raw_df = pd.DataFrame({f"Cell_{c}": raw[c] for c in ids}); raw_df.insert(0, "Frame", range(num_frames))
-    dff_df = pd.DataFrame({f"Cell_{c}": dff[c] for c in ids}); dff_df.insert(0, "Frame", range(num_frames))
-    return raw_df, dff_df, base
+    dff_df, _, f0_by_cell = cc.compute_dff0(raw_df, method="percell", floor=F0_FLOOR,
+                                             return_f0=True)
+    baselines = {
+        cell: {"f0i": float(f0),
+               "frames": [int(raw_df["Frame"].iloc[row]) for row in rows]}
+        for cell, (f0, rows) in f0_by_cell.items()
+    }
+    return raw_df, dff_df, baselines
 
 
 def _metrics(dff_df, num_frames):
@@ -161,5 +160,7 @@ def run(label, data_root, mem_base, ca_base):
     dff_df.to_csv(os.path.join(data_dir, "all_cells_normalized.csv"), index=False)
     m = _metrics(dff_df, num_frames); m["label"] = label; m["num_frames"] = num_frames
     m["baseline_frames"] = base
+    m["baseline_method"] = "percell"
+    m["f0_floor"] = F0_FLOOR
     print(f"  metrics: {m}")
     return m

@@ -1,0 +1,18 @@
+{
+  "trial": "LATA1TRAIL",
+  "condition": "BEFOREDRUG",
+  "source_raw_csv": "REPRODUCE/regenerated/LATA1TRAIL/BEFOREDRUG/all_cells_raw.csv",
+  "source_raw_sha256": "a0a42d9538cd3daefbf9695e5118c10d8685de37764a7295afaac4f0e05092fa",
+  "source_roi_membership_csv": "REPRODUCE/regenerated/LATA1TRAIL/BEFOREDRUG/roi_cells_normalized.csv",
+  "source_centroids_csv": "REPRODUCE/regenerated/LATA1TRAIL/BEFOREDRUG/centroids_0.csv",
+  "source_type": "raw-TIFF-regenerated traces",
+  "normalization": "percell",
+  "formula": "dF/F0i = (F_t_i - F0i) / F0i",
+  "baseline_selection": "each cell's own lowest-intensity frames",
+  "n_base_requested": 10,
+  "n_base_effective": 10,
+  "f0_floor": 1.0,
+  "n_frames": 31,
+  "n_cells": 484,
+  "n_roi_cells": 133
+}

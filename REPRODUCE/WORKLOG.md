@@ -1,5 +1,9 @@
 # CAFIN Reproduction — Research Work Log
 
+Sections 1–8 record earlier iterations and retain their historical numbers.
+Use the dated correction in §9 and the current `results/results.json` for the
+present analysis and figure count.
+
 A complete record of the work performed to reproduce *"Quantitatively Rapid Analysis of
 Calcium Transients in Epithelial Cell Layer in Vivo upon Cytoskeleton Disruption"*
 (Loo, Tan, Amiri Hezaveh, Ding, Buganza Tapole, Umulis, Deng, Li — draft manuscript).
@@ -137,3 +141,57 @@ descriptive. Additional honesty fixes made after the verification workflow:
 - LATA2 could not be recomputed end-to-end (raw TIFFs not in the dataset).
 - Cellpose segmentation uses a single reference frame (no cross-time cell tracking).
 - Written prose was AI-assisted and has not had a final human editing pass; data and figures verified.
+
+## 9. Correction — 2026-10-15
+
+This dated note supersedes earlier baseline, result, and one-command provenance
+statements above. The prior normalization selected one set of low-activity
+frames for all cells. The corrected method computes each cell's own F₀ᵢ from
+its ten lowest background-corrected raw-fluorescence frames (floor 1), then
+calculates ΔF/F₀ᵢ = (Fₜᵢ − F₀ᵢ) / F₀ᵢ. `normalize_f0_per_cell.py` applies this
+to the stored raw-fluorescence CSVs for all four paper fields and records each
+cell's F₀ᵢ, selected frames, and source checksum under `normalized_per_cell/`.
+Running that script alone does **not** repeat image registration, segmentation,
+or fluorescence extraction.
+
+The current `results/results.json` after per-cell normalization and frame-0
+recovery reports pooled descriptive medians of peak ΔF/F₀ᵢ 3.156→4.164
+(p=1.18e-27), mean ΔF/F₀ᵢ 0.803→1.666 (p=5.44e-127),
+transients/cell/frame 0.0968→0.200 (p=1.56e-215), and supra-threshold
+AUC/frame 0.496→1.235 (p=1.66e-100). Pooled pairwise correlation r is
+0.221→0.486 (p<1e-300). Field-mean heterogeneity CV is 0.65→1.04 and
+synchronization r is 0.23→0.44. LATA2's median peak decreases 3.04→2.45
+despite the pooled increase. Pooled cell and cell-pair
+p-values remain descriptive because there are only two biological trials.
+The generated tables abbreviate the compound to “Latrunculin”; source naming
+and methods identify it as Latrunculin A.
+
+Four original TIFF channel pairs (two trials × before/after, each with
+membrane and calcium sequences) were located in a local external data folder,
+but are not bundled in GitHub.
+`python run_all.py` recalculates F₀ᵢ from stored traces and rebuilds the
+analysis and paper. `python run_all.py --recompute`, with the source TIFFs
+available, also reruns the LATA1 image-processing chain and generates masks.
+The local run regenerated microscopy panels from trial-1 TIFFs and matching
+masks; a checkout without those sources reuses checked-in image-derived PNGs.
+The current draft paper has 18 figures: the earlier 15 plus an active-cell
+fraction plot and two spatial activity maps based on corrected traces and
+static cell masks. The maps do not verify individual cell tracks. The
+checked-in PDF is a static snapshot.
+
+The stored LATA2 baseline raw-fluorescence CSV had an empty frame-0 row.
+`recover_lata2_frame0.py` extracted that row for 479 mask-matched cells from
+the local calcium TIFF using the saved mask and source background subtraction.
+The method reproduced the saved registered frame-1 values with a maximum
+absolute error of 2.27×10⁻¹³. The source CSV was not overwritten; the
+recovered row and source checksums are stored in `source_repairs/`.
+
+The separate [six-trial audit](SIX_TRIAL_AUDIT.md) uses local verification
+assets and is exploratory. Those assets were processed with rigid ECC for
+both conditions, while the reference method specifies elastic registration
+after treatment. The six-trial results cannot replace the two-trial paper
+figures or claims. In a matched first-30-frame sensitivity comparison, none
+of five tested metrics reached false-discovery-adjusted q < 0.05.
+An elastic-registration pilot had a severe background-box/F₀ floor issue, so
+that pilot cannot establish a causal performance difference between elastic
+and rigid registration.

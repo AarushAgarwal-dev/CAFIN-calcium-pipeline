@@ -5,7 +5,7 @@ every number is injected from results.json so the paper always matches the data.
 
 Run AFTER reproduce.py:
     python generate_paper.py
-Produces: CAFIN_reproduced_paper.docx  (+ CAFIN_reproduced_paper.md)
+Produces: CAFIN_reproduced_paper_per_cell.docx and PROOF.md
 """
 import os, json
 from docx import Document
@@ -47,7 +47,8 @@ def frange(k1, k2):
 # Pre-assign every figure number in DOCUMENT order so any in-text reference (even a
 # forward one) is consistent with the caption and no intermediate figure is skipped.
 FIGURE_ORDER = ["pipeline", "reg_base", "reg_drug", "processing", "mask", "background", "roi",
-                "traces", "metrics", "region", "raster", "heatmap", "pattern", "spatial", "time"]
+                "traces", "active_fraction", "metrics", "region", "raster", "heatmap",
+                "peak_map", "activity_maps", "pattern", "spatial", "time"]
 for _k in FIGURE_ORDER:
     fignum(_k)
 
@@ -85,7 +86,7 @@ title = para("Quantitative Analysis of Calcium Transients in an Epithelial Cell 
 para("A computational reproduction of the authors' own analysis draft, generated directly from "
      "pipeline outputs on the same imaging data", italic=True, align="center", size=11)
 para("CAFIN pipeline · rigid ECC registration (elastic B-spline available) · Cellpose cyto3 "
-     "segmentation · ΔF/F₀ analysis", align="center", size=10)
+     "segmentation · per-cell ΔF/F₀ᵢ analysis", align="center", size=10)
 doc.add_paragraph()
 
 # ---------------- Abstract
@@ -96,15 +97,16 @@ abs = (
     "and deformation during live imaging. We present a scripted computational "
     "framework (CAFIN) for rapid analysis of Ca²⁺ transients in the zebrafish larval fin epithelium "
     "under cytoskeletal perturbation. Time-lapse recordings were motion-corrected with a two-way "
-    "registration strategy — global rigid alignment via OpenCV's enhanced correlation coefficient "
-    "(ECC) and non-rigid B-spline registration via SimpleITK — performed on the membrane channel and "
-    "propagated to the calcium channel. Single cells were segmented on the reference frame with "
-    "Cellpose, and per-cell ΔF/F₀ traces were extracted across the entire field. Comparing baseline "
+    "registration workflow on the membrane channel, with the resulting transform applied to the "
+    "calcium channel. Rigid alignment used OpenCV's enhanced correlation coefficient (ECC); "
+    "non-rigid B-spline registration was available for local deformation. Single cells were "
+    "segmented on the reference frame with Cellpose, and each cell's calcium trace was normalized "
+    "to its own baseline F₀ᵢ. Comparing baseline "
     f"activity to Latrunculin-induced actin disruption across two independent trials "
     f"({R['conditions']['trial1/BEFOREDRUG']['n_cells']}+{R['conditions']['trial2/BEFOREDRUG']['n_cells']} "
     f"baseline cells vs {R['conditions']['trial1/AFTERDRUG']['n_cells']}+"
     f"{R['conditions']['trial2/AFTERDRUG']['n_cells']} treated cells), actin disruption "
-    "consistently increased transient frequency, mean ΔF/F₀ and per-frame transient area, and "
+    "consistently increased transient frequency, mean ΔF/F₀ᵢ and per-frame transient area, and "
     "raised tissue-level spatial heterogeneity of peak amplitude "
     f"(CV {g('Baseline','spatial_heterogeneity_cv'):.2f} → "
     f"{g('Latrunculin','spatial_heterogeneity_cv'):.2f}) and temporal coordination "
@@ -126,7 +128,7 @@ para(
     "proliferation and morphogenesis. In epithelia, Ca²⁺ waves propagate across the sheet to "
     "coordinate collective behaviors such as migration, contraction and wound response. Because the "
     "actin cytoskeleton mechanically couples cells and gates mechanosensitive channels, disrupting "
-    "actin is expected to reshape Ca²⁺ dynamics. Latrunculin B inhibits actin polymerization by "
+    "actin is expected to reshape Ca²⁺ dynamics. Latrunculin A inhibits actin polymerization by "
     "sequestering monomeric G-actin, depolymerizing F-actin and thereby altering membrane tension "
     "and mechanosensitive-channel activity, which can trigger Ca²⁺ influx and intercellular waves."
 )
@@ -149,7 +151,7 @@ h("2.1 Imaging and preparation", 2)
 para(
     "Zebrafish larvae (3 dpf) expressing a genetically encoded Ca²⁺ indicator were imaged on a "
     "confocal microscope. The green channel reported cytosolic Ca²⁺; a membrane label provided a "
-    "structurally stable red channel. Latrunculin A/B (final ~200 µM in 1% DMSO) was applied "
+    "structurally stable red channel. Latrunculin A (final ~200 µM in 1% DMSO) was applied "
     "immediately before imaging as the actin-disrupting perturbation; DMSO served as vehicle. Each "
     "field was recorded before (baseline) and after treatment."
 )
@@ -171,7 +173,7 @@ figure(os.path.join(FIGS, "figP2_registration_baseline.png"), "reg_base",
        "frame; white = aligned). Before registration the moving frame is offset; after ECC "
        "alignment the channels overlap.")
 figure(os.path.join(FIGS, "figP3_registration_afterdrug.png"), "reg_drug",
-       "Rigid-vs-elastic registration after Latrunculin B (frame 0 green, moving frame "
+       "Rigid-vs-elastic registration after Latrunculin A (frame 0 green, moving frame "
        "magenta; white = aligned). The large post-treatment motion is predominantly global: rigid "
        "ECC substantially reduces the mean membrane residual (annotated on each panel), and elastic "
        "B-spline yields only a marginal further improvement on this recording. Rigid registration "
@@ -185,9 +187,12 @@ para(
     "reference regions were selected automatically as the lowest-median image tiles — a scripted "
     "proxy for the original protocol's manual selection of signal-free regions; per frame, values "
     "outside 1.5×IQR were removed, each region reduced to its median, and the average of the three "
-    "medians subtracted from every pixel and clipped at zero. For each cell, the mean pixel intensity "
-    "inside its mask was measured per frame to give a fluorescence trace, normalized as "
-    "ΔF/F₀ = (Fₜ − F₀)/F₀, where F₀ is the mean of the lowest-activity frames."
+    "medians subtracted from every pixel and clipped at zero. For each cell i, the mean pixel "
+    "intensity inside its mask was measured at each frame t to give Fₜ,ᵢ. Its own baseline F₀ᵢ "
+    "was the mean of its n lowest finite, background-corrected frame intensities, where "
+    "n = min(10, max(3, T // 3)) for a recording of T frames. F₀ᵢ was floored at 1 intensity "
+    "unit to avoid near-zero division. Each cell was then normalized independently as "
+    "ΔF/F₀ᵢ(t) = (Fₜ,ᵢ − F₀ᵢ) / F₀ᵢ; no population-wide baseline was used."
 )
 figure(os.path.join(FIGS, "figP4_processing_row.png"), "processing",
        "Processing sequence: raw membrane frame 0, registered membrane, registered "
@@ -208,7 +213,7 @@ figure(os.path.join(FIGS, "figP9_roi.png"), "roi",
        "in-view subset.")
 h("2.4 Metrics and statistics", 2)
 para(
-    "Per cell we computed peak ΔF/F₀, mean ΔF/F₀, transient count (SciPy find_peaks, height 0.5, "
+    "Per cell we computed peak ΔF/F₀ᵢ, mean ΔF/F₀ᵢ, transient count (SciPy find_peaks, height 0.5, "
     "min distance 2 frames), transients per frame, and per-frame supra-threshold area (AUC). At the "
     "tissue level we computed the active fraction, spatial heterogeneity (coefficient of variation of "
     "per-cell peak amplitude across the field) and temporal synchronization (mean pairwise Pearson "
@@ -232,7 +237,7 @@ h("3.1 Single-cell activity increases after actin disruption", 2)
 C = R["conditions"]
 para(
     f"Because only two biological trials were available per condition, we take the per-trial "
-    f"direction of effect (Table 1) as the primary evidence. Transient frequency, mean ΔF/F₀ and "
+    f"direction of effect (Table 1) as the primary evidence. Transient frequency, mean ΔF/F₀ᵢ and "
     f"spatial heterogeneity increased in both independent trials after treatment. The effect is not "
     f"uniform across every metric: the median peak amplitude rose in trial 1 "
     f"({C['trial1/BEFOREDRUG']['median_peak_amp']:.2f}→{C['trial1/AFTERDRUG']['median_peak_amp']:.2f}) "
@@ -246,12 +251,12 @@ para(
 )
 # Table 1: per-trial transparency
 _cap = doc.add_paragraph()
-_r = _cap.add_run("Table 1. Per-trial summary (both conditions). trial1 = LATA1 (stored ΔF/F₀ "
-                  "CSVs previously computed from raw images); trial2 = LATA2 (existing pipeline CSVs; "
-                  "raw TIFFs unavailable).")
+_r = _cap.add_run("Table 1. Per-trial summary (both conditions). LATA1 raw fluorescence "
+                  "traces originated from TIFF processing; LATA2 raw traces came from stored "
+                  "pipeline CSVs. Every cell was renormalized to its own F₀ᵢ for this analysis.")
 _r.italic = True; _r.font.size = Pt(9)
 t1 = doc.add_table(rows=1, cols=6); t1.style = "Light Grid Accent 1"
-for i, htxt in enumerate(["Trial / condition", "Cells", "Active %", "Median peak ΔF/F₀",
+for i, htxt in enumerate(["Trial / condition", "Cells", "Active %", "Median peak ΔF/F₀ᵢ",
                           "Heterogeneity CV", "Sync r"]):
     t1.rows[0].cells[i].text = htxt
 for key in ["trial1/BEFOREDRUG", "trial1/AFTERDRUG", "trial2/BEFOREDRUG", "trial2/AFTERDRUG"]:
@@ -260,12 +265,11 @@ for key in ["trial1/BEFOREDRUG", "trial1/AFTERDRUG", "trial2/BEFOREDRUG", "trial
     row[1].text = str(s["n_cells"]); row[2].text = f"{s['active_fraction']*100:.0f}"
     row[3].text = f"{s['median_peak_amp']:.2f}"; row[4].text = f"{s['spatial_heterogeneity_cv']:.2f}"
     row[5].text = f"{s['temporal_sync_r']:.3f}"
-_rec = [k for k, v in C.items() if "recomputed" in v.get("provenance", "")]
 para(
     f"As descriptive support, we also pooled the single cells across both trials "
     f"({T['peak_amp']['n1']} baseline vs {T['peak_amp']['n2']} treated cells). Median transient rate "
     f"rose from {T['peaks_per_frame']['med1']:.3f} to {T['peaks_per_frame']['med2']:.3f} "
-    f"transients/frame, mean ΔF/F₀ from {T['mean_dff']['med1']:.2f} to {T['mean_dff']['med2']:.2f}, "
+    f"transients/frame, mean ΔF/F₀ᵢ from {T['mean_dff']['med1']:.2f} to {T['mean_dff']['med2']:.2f}, "
     f"and per-frame supra-threshold area {T['auc']['med2']/max(T['auc']['med1'],1e-9):.1f}-fold; "
     f"Shapiro–Wilk rejected normality for every metric, so the {T['peak_amp']['test']} was applied "
     f"(Appendix). These pooled comparisons yield extremely small p-values, but because they treat "
@@ -273,24 +277,26 @@ para(
     f"measure of population separation, not as biological-replicate significance. Two caveats apply: "
     f"the pooled peak-amplitude comparison spans unequal recording lengths (baseline 31 vs treated "
     f"55–90 frames), so a maximum-based metric is only weakly comparable — the length-normalized "
-    f"transient rate and per-frame area are the sound metrics; and {4 - len(_rec)} of the 4 fields "
-    f"(the LATA2 trial) derive from the pipeline's pre-existing ΔF/F₀ CSVs because their raw TIFFs "
-    f"were unavailable. The stored LATA1 CSVs were previously produced by the documented "
-    f"registration→cyto3→background→ΔF/F₀ chain (see §5)."
+    f"transient rate and per-frame area are more comparable. The LATA2 fields use stored "
+    f"background-corrected raw fluorescence traces; LATA1 traces originated from the documented "
+    f"registration→cyto3→background-extraction chain. All four fields were renormalized "
+    f"from raw per-cell traces for this analysis (see §5)."
 )
 figure(os.path.join(FIGS, "fig1_traces.png"), "traces",
-       "Representative single-cell ΔF/F₀ traces (40 most active cells; black = population "
-       "mean; dashed line = transient threshold). Baseline transients are brief and modest; after "
-       "Latrunculin B they are large and sustained.")
+       "Representative single-cell ΔF/F₀ᵢ traces (40 most active cells; black = population "
+       "mean; dashed line = transient threshold). Trial-specific changes are summarized in Table 1.")
+figure(os.path.join(FIGS, "figR4_active_cell_fraction.png"), "active_fraction",
+       "Fraction of segmented cells above ΔF/F₀ᵢ = 0.5 in each processed frame, "
+       "shown separately for the baseline and Latrunculin A recordings. The curves describe "
+       "activity within each field; different recording lengths limit direct timepoint comparison.")
 figure(os.path.join(FIGS, "fig3_metrics.png"), "metrics",
-       "Single-cell metric distributions, baseline vs Latrunculin B, pooled across two "
+       "Single-cell metric distributions, baseline vs Latrunculin A, pooled across two "
        "trials (descriptive; the pooled per-cell p-values annotated here are pseudoreplicated — see "
        "§3.1). The length-normalized transient rate and per-frame area are the sound metrics.")
 figure(os.path.join(FIGS, "figP7_region_bars.png"), "region",
-       "Regional single-cell activity (peak ΔF/F₀, %). Cells were split into four equal "
+       "Regional single-cell activity (peak ΔF/F₀ᵢ). Cells were split into four equal "
        "proximal-to-distal bands (R1–R4) by centroid y-position; bars are region means ± SEM. "
-       "Regional differences are significant in both conditions (Kruskal–Wallis, **** p<1e-4), and "
-       "the spatial activity pattern differs between baseline and treatment.")
+       "The figure reports the Kruskal–Wallis omnibus comparison within each condition.")
 
 h("3.2 Tissue-level Ca²⁺ patterns and spatial heterogeneity", 2)
 para(
@@ -303,27 +309,32 @@ para(
 )
 figure(os.path.join(FIGS, "figP6_raster.png"), "raster",
        "Ca²⁺ transient event raster (each tick = a detected transient; cells sorted by "
-       "first event). Baseline activity is sparse; Latrunculin B produces dense, sustained events.")
+       "first event). The two conditions show different event patterns.")
 figure(os.path.join(FIGS, "fig2_heatmaps.png"), "heatmap",
        "Tissue-level activity heatmaps (cells × frames, shared color scale). Left: baseline. "
-       "Right: Latrunculin B shows pervasive, high-ΔF/F₀ activity.")
+       "Right: Latrunculin A. Each cell's signal uses its own F₀ᵢ baseline.")
+figure(os.path.join(FIGS, "figR5_peak_activity_static_masks.png"), "peak_map",
+       "Per-cell peak ΔF/F₀ᵢ painted on the saved frame-0 segmentation masks. "
+       "Both conditions use the same color scale; the masks define fixed ROIs after registration.")
+figure(os.path.join(FIGS, "figR6_timepoint_activity_static_masks.png"), "activity_maps",
+       "Early, middle, and late per-cell ΔF/F₀ᵢ values mapped to the fixed frame-0 masks. "
+       "These images show fluorescence in registered ROIs and do not establish cell movement.")
 figure(os.path.join(FIGS, "fig5_pattern_metrics.png"), "pattern",
        "Tissue-level pattern metrics (bars = condition mean; points = individual trials). "
        "Spatial heterogeneity and temporal synchronization both rise after actin disruption.")
 
 h("3.3 Spatial coordination of Ca²⁺ activity", 2)
 para(
-    f"Pairwise correlation decayed with inter-cell distance in both conditions, but was elevated at "
-    f"every distance after Latrunculin treatment, with the strongest short-range coordination "
+    f"Distance-binned pairwise correlations summarize spatial coordination in both conditions "
     f"(Figure {fignum('spatial')}). The mean pairwise correlation among active cells rose from "
     f"{g('Baseline','temporal_sync_r'):.2f} to {g('Latrunculin','temporal_sync_r'):.2f}, and the "
-    f"pooled pairwise-correlation distribution shifted significantly upward "
-    f"({p_fmt(T['pairwise_sync_r']['p'])}, Mann–Whitney U). Thus actin disruption both amplifies and "
-    "restructures the spatial coordination of epithelial Ca²⁺ signaling."
+    f"pooled pairwise-correlation distribution shifted upward "
+    f"({p_fmt(T['pairwise_sync_r']['p'])}, Mann–Whitney U). This cell-pair comparison is "
+    "descriptive because pairs within each trial are not independent biological replicates."
 )
 figure(os.path.join(FIGS, "fig4_spatial.png"), "spatial",
        "Mean pairwise correlation versus inter-cell centroid distance, pooled per condition. "
-       "Latrunculin B raises coordination across all distances.")
+       "Latrunculin A raises coordination across the distances shown.")
 
 h("3.4 Time-dependence of the response", 2)
 para(
@@ -335,15 +346,15 @@ para(
     f"adaptation; testing that would require longer or repeated late-timepoint imaging."
 )
 figure(os.path.join(FIGS, "fig6_time.png"), "time",
-       "Time-dependence of the response: mean per-cell peak ΔF/F₀ across early/mid/late "
+       "Time-dependence of the response: mean per-cell peak ΔF/F₀ᵢ across early/mid/late "
        "windows for each treated field.")
 
 # ---------------- Discussion
 h("4. Discussion and Conclusion", 1)
 para(
     "Using a scripted, deterministic pipeline we quantified how actin disruption reshapes epithelial "
-    "Ca²⁺ dynamics in vivo. In both trials, Latrunculin B increased single-cell transient frequency "
-    "and mean ΔF/F₀, raised spatial heterogeneity of peak responses, and elevated inter-cellular "
+    "Ca²⁺ dynamics in vivo. In both trials, Latrunculin A increased single-cell transient frequency "
+    "and mean ΔF/F₀ᵢ, raised spatial heterogeneity of peak responses, and elevated inter-cellular "
     "correlation relative to baseline. These changes are consistent with actin depolymerization "
     "altering membrane tension and mechanosensitive-channel activity, promoting Ca²⁺ influx and "
     "intercellular propagation while degrading the uniform, finely balanced signaling seen in the "
@@ -362,34 +373,59 @@ para(
     "tracking, real-time registration and 3D volumetric imaging, increase replication, and combine "
     "cytoskeletal mutants with this platform to dissect specific actin–Ca²⁺ couplings."
 )
+para(
+    "The reference manuscript draft discusses six paired trials. A separate six-trial local "
+    "audit remains exploratory because its processing methods and data provenance differ from "
+    "the two trial pairs analyzed here. The present tables and figures therefore do not reproduce "
+    "the reference draft's six-trial estimates or significance tests."
+)
 
 # ---------------- Reproducibility
 h("5. Reproducibility and data provenance", 1)
-_prov = {k: v.get("provenance", "") for k, v in C0.items()}
-_recomputed = [k for k, v in _prov.items() if "recomputed" in v]
+_local_raw_root = os.environ.get("CAFIN_RAW_DATA_ROOT")
+_local_source_note = (
+    "Original microscopy TIFFs were located in a local data folder outside the repository; "
+    "they are not bundled with this checkout."
+    if ((_local_raw_root and os.path.isdir(_local_raw_root))
+        or RAW_TRACES_RECOMPUTED or IMAGE_FIGURES_REGENERATED) else
+    "Original microscopy TIFFs are not bundled with this checkout; stored raw per-cell "
+    "fluorescence traces permit renormalization without rerunning image extraction."
+)
 _image_source = (
-    "The nine paper-style microscopy figures were regenerated from the raw TIFFs in this run."
+    "The paper-style microscopy panels and three activity figures were regenerated from "
+    "local TIFFs, saved cell masks, and corrected traces in this run."
     if IMAGE_FIGURES_REGENERATED else
-    "The nine paper-style microscopy figures are previously generated assets retained with "
-    "this repository; the original TIFFs were unavailable in this run."
+    "The paper-style microscopy and activity figures were retained from the repository and "
+    "were not regenerated in this run."
 )
 _trace_source = (
-    "LATA1 ΔF/F₀ traces were recomputed from raw TIFFs in this run using "
-    "registration, Cellpose cyto3 segmentation, background subtraction, and normalization."
+    "LATA1 raw fluorescence traces were re-extracted from local TIFFs in this run using "
+    "registration, Cellpose cyto3 segmentation, and background subtraction."
     if RAW_TRACES_RECOMPUTED else
-    "This run used stored LATA1 CSVs previously recomputed from raw TIFFs; it did not rerun "
-    "registration, segmentation, or fluorescence extraction from raw images."
+    "This run used LATA1 raw fluorescence CSVs previously extracted from TIFFs; it did not "
+    "rerun registration, segmentation, or fluorescence extraction."
 )
 para(
-    f"The numerical results and six quantitative figures above were regenerated from the "
-    f"included per-cell ΔF/F₀ CSVs by reproduce.py; generate_paper.py assembled this document. "
-    f"{_image_source} {_trace_source} The LATA2 fields use the pipeline's existing CSVs because "
-    f"their raw TIFFs are unavailable. Stored CSVs previously derived from raw images cover "
-    f"{len(_recomputed)} of {len(C0)} fields (LATA1 before/after). Field provenance is recorded "
+    f"For all four fields, each cell's F₀ᵢ and ΔF/F₀ᵢ trace were recalculated from stored or newly "
+    f"extracted, background-corrected raw fluorescence CSVs. The numerical results and six "
+    f"quantitative figures were then generated by reproduce.py from these normalized traces; "
+    f"generate_paper.py assembled this document. {_local_source_note} {_image_source} "
+    f"{_trace_source} The LATA2 fields used stored pipeline raw fluorescence CSVs and were "
+    f"renormalized in this run; LATA2 image extraction was not rerun. Each field's baseline values "
+    f"and source trace hashes are retained in normalized_per_cell/, and provenance is summarized "
     f"in field_summary.csv. Analyses use a fixed random seed; see README_REPRODUCE.md."
+)
+para(
+    "The stored LATA2 baseline raw-trace table lacked fluorescence values in frame 0 for every "
+    "cell. That row was recovered from the locally available source calcium TIFF with the saved "
+    "frame-0 mask and the same three-region background method. Applying the method to registered "
+    "frame 1 reproduced all 479 stored cell means within floating-point precision. The original "
+    "trace table was retained; the repaired row and source checksums are recorded in "
+    "REPRODUCE/source_repairs/."
 )
 
 # summary table
+doc.add_page_break()
 h("Appendix: reproduced summary statistics", 2)
 _cap = doc.add_paragraph()
 _r = _cap.add_run("Statistical tests. Normality assessed by Shapiro–Wilk on each group; "
@@ -400,7 +436,7 @@ hdr = tbl.rows[0].cells
 for i, t in enumerate(["Metric", "Median base", "Median Lat", "Shapiro p (base/Lat)",
                        "Test used", "p-value", "effect (r)"]):
     hdr[i].text = t
-label = {"peak_amp": "Peak ΔF/F₀", "mean_dff": "Mean ΔF/F₀",
+label = {"peak_amp": "Peak ΔF/F₀ᵢ", "mean_dff": "Mean ΔF/F₀ᵢ",
          "peaks_per_frame": "Transients / frame", "auc": "Transient AUC",
          "pairwise_sync_r": "Pairwise correlation"}
 def _sp(x):
@@ -414,11 +450,11 @@ for k, t in T.items():
     row[5].text = ("<1e-300" if t["p"] == 0 else f"{t['p']:.1e}")
     row[6].text = f"{t['effect']:.2f}"
 
-out_docx = os.path.join(HERE, "CAFIN_reproduced_paper.docx")
+out_docx = os.path.join(HERE, "CAFIN_reproduced_paper_per_cell.docx")
 try:
     doc.save(out_docx)
 except PermissionError:
-    alt = os.path.join(HERE, "CAFIN_reproduced_paper_NEW.docx")
+    alt = os.path.join(HERE, "CAFIN_reproduced_paper_per_cell_NEW.docx")
     doc.save(alt)
     print(f"NOTE: {out_docx} was locked (open in Word?). Saved to {alt} instead.")
     out_docx = alt
@@ -432,11 +468,21 @@ def cond(key, tk):
 md = []
 md.append("# Reproduction proof — CAFIN calcium-transient study\n")
 md.append("Generated automatically from `results/results.json`; every number below is computed "
-          "from the pipeline's per-cell ΔF/F₀ outputs. Re-running `reproduce.py` + `generate_paper.py` "
+          "from per-cell ΔF/F₀ᵢ outputs. Each F₀ᵢ is the mean of cell i's own "
+          "n = min(10, max(3, T // 3)) lowest finite, background-corrected frames "
+          "(floor 1); ΔF/F₀ᵢ(t) = (Fₜ,ᵢ − F₀ᵢ) / F₀ᵢ. "
+          "Re-running normalization, `reproduce.py`, and `generate_paper.py` "
           "regenerates this file identically (fixed seed).\n")
-md.append(f"{_image_source} {_trace_source}\n")
+md.append(f"{_local_source_note} {_image_source} {_trace_source} The LATA2 fields used "
+          "stored raw per-cell fluorescence CSVs. All four fields were renormalized in this run.\n")
+md.append("The stored LATA2 baseline trace table lacked frame-0 values. A separately checked "
+          "source-TIFF row restores them without changing the original CSV; see "
+          "source_repairs/lata2_before_frame0_provenance.json.\n")
+md.append("The reference manuscript's six-paired-trial result is not reproduced here. "
+          "A separate six-trial local audit is exploratory because processing methods and "
+          "provenance differ; this report presents two trial pairs.\n")
 md.append("## 1. Fields analyzed\n")
-md.append("| Field | cells | frames | active % | median peak ΔF/F₀ | heterogeneity CV | sync r | provenance |")
+md.append("| Field | cells | frames | active % | median peak ΔF/F₀ᵢ | heterogeneity CV | sync r | provenance |")
 md.append("|---|---|---|---|---|---|---|---|")
 for tk in ["trial1", "trial2"]:
     for c in ["BEFOREDRUG", "AFTERDRUG"]:
@@ -449,7 +495,7 @@ md.append("\n## 2. Statistical tests (baseline vs Latrunculin, pooled cells)\n")
 md.append("Normality via Shapiro–Wilk; Welch t-test if both groups normal, else Mann–Whitney U.\n")
 md.append("| Metric | median base | median Lat | Shapiro p (base/Lat) | test | p-value | effect |")
 md.append("|---|---|---|---|---|---|---|")
-lbl = {"peak_amp": "Peak ΔF/F₀", "mean_dff": "Mean ΔF/F₀", "peaks_per_frame": "Transients/frame",
+lbl = {"peak_amp": "Peak ΔF/F₀ᵢ", "mean_dff": "Mean ΔF/F₀ᵢ", "peaks_per_frame": "Transients/frame",
        "auc": "Transient AUC", "pairwise_sync_r": "Pairwise correlation r"}
 def _spm(x):
     return "<1e-4" if (isinstance(x, (int, float)) and x == x and x < 1e-4) else (f"{x:.2f}" if x == x else "n/a")
@@ -464,10 +510,14 @@ md.append("|---|---|---|")
 md.append(f"| Increased spatial heterogeneity | ✅ | CV {g('Baseline','spatial_heterogeneity_cv'):.2f} → "
           f"{g('Latrunculin','spatial_heterogeneity_cv'):.2f} (both trials) |")
 md.append(f"| Altered temporal synchronization | ✅ | mean pairwise r {g('Baseline','temporal_sync_r'):.2f} → "
-          f"{g('Latrunculin','temporal_sync_r'):.2f}; {p_fmt(T['pairwise_sync_r']['p'])} |")
-md.append(f"| Increased amplitude / duration variability | ✅ | peak amp & AUC up, "
-          f"{p_fmt(T['peak_amp']['p'])} / {p_fmt(T['auc']['p'])} |")
-md.append("| Distinct Ca²⁺ propagation/coordination | ✅ | correlation-vs-distance elevated at all ranges (Fig 4) |")
+          f"{g('Latrunculin','temporal_sync_r'):.2f} across two trial pairs; pooled cell-pair p-values are descriptive |")
+md.append(f"| Increased peak amplitude | Mixed | Trial 1 median "
+          f"{C0['trial1/BEFOREDRUG']['median_peak_amp']:.2f} → "
+          f"{C0['trial1/AFTERDRUG']['median_peak_amp']:.2f}; trial 2 "
+          f"{C0['trial2/BEFOREDRUG']['median_peak_amp']:.2f} → "
+          f"{C0['trial2/AFTERDRUG']['median_peak_amp']:.2f} |")
+md.append("| Distinct Ca²⁺ propagation/coordination | Partial | Correlation-versus-distance "
+          "supports a coordination difference; propagation was not directly measured |")
 md.append("\n## 4. Figures (numbered as in the paper)\n")
 _figs = [("pipeline", "figP1_pipeline.png", "Image & data processing pipeline"),
          ("reg_base", "figP2_registration_baseline.png", "Registration overlay, baseline (green/magenta)"),
@@ -476,11 +526,14 @@ _figs = [("pipeline", "figP1_pipeline.png", "Image & data processing pipeline"),
          ("mask", "figP5_mask_numbered.png", "Cell mask with numbered ROIs"),
          ("background", "figP8_background.png", "Background reference regions (3 boxes)"),
          ("roi", "figP9_roi.png", "ROI selection (cells intersecting the ROI)"),
-         ("traces", "fig1_traces.png", "Single-cell ΔF/F₀ traces"),
+         ("traces", "fig1_traces.png", "Single-cell ΔF/F₀ᵢ traces"),
+         ("active_fraction", "figR4_active_cell_fraction.png", "Active-cell fraction per frame"),
          ("metrics", "fig3_metrics.png", "Single-cell metric comparison + p-values"),
-         ("region", "figP7_region_bars.png", "Regional ΔF/F₀ (R1–R4) with significance"),
+         ("region", "figP7_region_bars.png", "Regional ΔF/F₀ᵢ (R1–R4)"),
          ("raster", "figP6_raster.png", "Ca²⁺ transient event raster"),
          ("heatmap", "fig2_heatmaps.png", "Tissue activity heatmaps"),
+         ("peak_map", "figR5_peak_activity_static_masks.png", "Per-cell peak activity map"),
+         ("activity_maps", "figR6_timepoint_activity_static_masks.png", "Activity maps at three timepoints"),
          ("pattern", "fig5_pattern_metrics.png", "Tissue pattern metrics"),
          ("spatial", "fig4_spatial.png", "Spatial coordination vs distance"),
          ("time", "fig6_time.png", "Time-dependence")]

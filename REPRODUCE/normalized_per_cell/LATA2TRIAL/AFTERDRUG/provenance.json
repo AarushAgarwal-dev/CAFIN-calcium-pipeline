@@ -1,0 +1,18 @@
+{
+  "trial": "LATA2TRIAL",
+  "condition": "AFTERDRUG",
+  "source_raw_csv": "LATA2TRIAL/AFTERDRUG/all_cells_raw.csv",
+  "source_raw_sha256": "b73ebcbeaf044ba42f280571089daa7bff2e49c096338fe58770454970abaac3",
+  "source_roi_membership_csv": "LATA2TRIAL/AFTERDRUG/roi_cells_normalized.csv",
+  "source_centroids_csv": "LATA2TRIAL/AFTERDRUG/centroids_0.csv",
+  "source_type": "stored pipeline traces",
+  "normalization": "percell",
+  "formula": "dF/F0i = (F_t_i - F0i) / F0i",
+  "baseline_selection": "each cell's own lowest-intensity frames",
+  "n_base_requested": 10,
+  "n_base_effective": 10,
+  "f0_floor": 1.0,
+  "n_frames": 55,
+  "n_cells": 452,
+  "n_roi_cells": 107
+}

@@ -33,6 +33,7 @@ ROOT = os.path.dirname(HERE)                       # CAFIN_Cleanedup_Code_Aarush
 RESULTS = os.path.join(HERE, "results")
 FIGS = os.path.join(RESULTS, "figures")
 REGEN = os.path.join(HERE, "regenerated")          # end-to-end recomputed CSVs (LATA1)
+NORMALIZED_PER_CELL = os.path.join(HERE, "normalized_per_cell")
 os.makedirs(FIGS, exist_ok=True)
 
 RNG = np.random.default_rng(0)                     # fixed seed => identical every run
@@ -51,8 +52,18 @@ plt.rcParams.update({
 
 # ----------------------------------------------------------------- loading
 def _field_dir(trial_dir, cond):
-    """Prefer the end-to-end recomputed CSVs (regenerated/) when present, else the
-    existing pipeline CSVs. Returns (dir, provenance_string)."""
+    """Prefer per-cell F0i output, then TIFF-regenerated or pipeline CSVs."""
+    per_cell = os.path.join(NORMALIZED_PER_CELL, trial_dir, cond)
+    if os.path.exists(os.path.join(per_cell, "all_cells_normalized.csv")):
+        origin = ("raw-TIFF-regenerated traces" if trial_dir == "LATA1TRAIL"
+                  else "stored pipeline traces")
+        if trial_dir == "LATA2TRIAL" and cond == "BEFOREDRUG":
+            provenance_path = os.path.join(per_cell, "provenance.json")
+            if os.path.isfile(provenance_path):
+                with open(provenance_path, encoding="utf-8") as fh:
+                    if json.load(fh).get("source_repair"):
+                        origin += "; frame 0 recovered from source TIFF"
+        return per_cell, f"each cell's own 10 lowest frames (F0i) from {origin}"
     regen = os.path.join(REGEN, trial_dir, cond)
     if os.path.exists(os.path.join(regen, "all_cells_normalized.csv")):
         return regen, "previously recomputed from raw TIFFs (stored CSV)"
@@ -266,7 +277,7 @@ def make_figures(fields, per_cell, tests, results):
     # ---- FIG 1: representative dF/F0 traces, baseline vs drug (trial1) ----
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), sharey=False)
     for ax, key, title in [(axes[0], "trial1/BEFOREDRUG", "Baseline"),
-                           (axes[1], "trial1/AFTERDRUG", "Latrunculin B")]:
+                           (axes[1], "trial1/AFTERDRUG", "Latrunculin A")]:
         A = fields[key]["A"]; f = np.arange(A.shape[0])
         # pick 40 most active cells for legibility, strong contrast
         order = np.argsort(A.max(0))[::-1][:40]
@@ -284,7 +295,7 @@ def make_figures(fields, per_cell, tests, results):
     vmax = np.percentile(np.concatenate([fields["trial1/BEFOREDRUG"]["A"].ravel(),
                                          fields["trial1/AFTERDRUG"]["A"].ravel()]), 99)
     for ax, key, title in [(axes[0], "trial1/BEFOREDRUG", "Baseline"),
-                           (axes[1], "trial1/AFTERDRUG", "Latrunculin B")]:
+                           (axes[1], "trial1/AFTERDRUG", "Latrunculin A")]:
         A = fields[key]["A"]
         order = np.argsort(A.max(1))[::-1]
         im = ax.imshow(A[:, order].T, aspect="auto", cmap="magma", vmin=0, vmax=vmax,
@@ -312,7 +323,7 @@ def make_figures(fields, per_cell, tests, results):
         ax.plot([1, 2], [y, y], color="k", lw=1)
         ax.text(1.5, y, f"{stars(t['p'])}\np={t['p']:.1e}", ha="center", va="bottom", fontsize=8)
         ax.set_ylim(top=y * 1.35 if y > 0 else None)
-    fig.suptitle("Baseline vs Latrunculin B — single-cell metrics (Mann–Whitney U)", fontweight="bold")
+    fig.suptitle("Baseline vs Latrunculin A — single-cell metrics (Mann–Whitney U)", fontweight="bold")
     fig.tight_layout(); fig.savefig(os.path.join(FIGS, "fig3_metrics.png")); plt.close(fig)
 
     # ---- FIG 4: spatial coordination (correlation vs distance) ----

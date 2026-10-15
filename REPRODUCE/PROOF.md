@@ -1,17 +1,21 @@
 # Reproduction proof — CAFIN calcium-transient study
 
-Generated automatically from `results/results.json`; every number below is computed from the pipeline's per-cell ΔF/F₀ outputs. Re-running `reproduce.py` + `generate_paper.py` regenerates this file identically (fixed seed).
+Generated automatically from `results/results.json`; every number below is computed from per-cell ΔF/F₀ᵢ outputs. Each F₀ᵢ is the mean of cell i's own n = min(10, max(3, T // 3)) lowest finite, background-corrected frames (floor 1); ΔF/F₀ᵢ(t) = (Fₜ,ᵢ − F₀ᵢ) / F₀ᵢ. Re-running normalization, `reproduce.py`, and `generate_paper.py` regenerates this file identically (fixed seed).
 
-The nine paper-style microscopy figures are previously generated assets retained with this repository; the original TIFFs were unavailable in this run. This run used stored LATA1 CSVs previously recomputed from raw TIFFs; it did not rerun registration, segmentation, or fluorescence extraction from raw images.
+Original microscopy TIFFs were located in a local data folder outside the repository; they are not bundled with this checkout. The paper-style microscopy panels and three activity figures were regenerated from local TIFFs, saved cell masks, and corrected traces in this run. This run used LATA1 raw fluorescence CSVs previously extracted from TIFFs; it did not rerun registration, segmentation, or fluorescence extraction. The LATA2 fields used stored raw per-cell fluorescence CSVs. All four fields were renormalized in this run.
+
+The stored LATA2 baseline trace table lacked frame-0 values. A separately checked source-TIFF row restores them without changing the original CSV; see source_repairs/lata2_before_frame0_provenance.json.
+
+The reference manuscript's six-paired-trial result is not reproduced here. A separate six-trial local audit is exploratory because processing methods and provenance differ; this report presents two trial pairs.
 
 ## 1. Fields analyzed
 
-| Field | cells | frames | active % | median peak ΔF/F₀ | heterogeneity CV | sync r | provenance |
+| Field | cells | frames | active % | median peak ΔF/F₀ᵢ | heterogeneity CV | sync r | provenance |
 |---|---|---|---|---|---|---|---|
-| trial1 Baseline | 484 | 31 | 96.5% | 2.14 | 0.77 | 0.260 | previously recomputed from raw TIFFs (stored CSV) |
-| trial1 Latrunculin | 517 | 90 | 100.0% | 5.40 | 0.92 | 0.532 | previously recomputed from raw TIFFs (stored CSV) |
-| trial2 Baseline | 479 | 31 | 98.3% | 2.14 | 0.68 | 0.241 | pipeline CSV (raw TIFFs unavailable) |
-| trial2 Latrunculin | 452 | 55 | 98.7% | 1.64 | 1.34 | 0.366 | pipeline CSV (raw TIFFs unavailable) |
+| trial1 Baseline | 484 | 31 | 99.6% | 3.40 | 0.63 | 0.245 | each cell's own 10 lowest frames (F0i) from raw-TIFF-regenerated traces |
+| trial1 Latrunculin | 517 | 90 | 100.0% | 7.63 | 0.82 | 0.532 | each cell's own 10 lowest frames (F0i) from raw-TIFF-regenerated traces |
+| trial2 Baseline | 479 | 31 | 100.0% | 3.04 | 0.67 | 0.221 | each cell's own 10 lowest frames (F0i) from stored pipeline traces; frame 0 recovered from source TIFF |
+| trial2 Latrunculin | 452 | 55 | 100.0% | 2.45 | 1.26 | 0.353 | each cell's own 10 lowest frames (F0i) from stored pipeline traces |
 
 ## 2. Statistical tests (baseline vs Latrunculin, pooled cells)
 
@@ -19,20 +23,20 @@ Normality via Shapiro–Wilk; Welch t-test if both groups normal, else Mann–Wh
 
 | Metric | median base | median Lat | Shapiro p (base/Lat) | test | p-value | effect |
 |---|---|---|---|---|---|---|
-| Peak ΔF/F₀ | 2.142 | 3.163 | <1e-4/<1e-4 | Mann-Whitney U | 1.67e-27 | 0.29 |
-| Mean ΔF/F₀ | 0.361 | 1.111 | <1e-4/<1e-4 | Mann-Whitney U | 3.39e-107 | 0.58 |
-| Transients/frame | 0.097 | 0.178 | <1e-4/<1e-4 | Mann-Whitney U | 1.04e-173 | 0.74 |
-| Transient AUC | 0.216 | 0.745 | <1e-4/<1e-4 | Mann-Whitney U | 6.58e-75 | 0.48 |
-| Pairwise correlation r | 0.244 | 0.491 | <1e-4/<1e-4 | Mann-Whitney U | <1e-300 | 0.35 |
+| Peak ΔF/F₀ᵢ | 3.156 | 4.164 | <1e-4/<1e-4 | Mann-Whitney U | 1.18e-27 | 0.29 |
+| Mean ΔF/F₀ᵢ | 0.803 | 1.666 | <1e-4/<1e-4 | Mann-Whitney U | 5.44e-127 | 0.63 |
+| Transients/frame | 0.097 | 0.200 | <1e-4/<1e-4 | Mann-Whitney U | 1.56e-215 | 0.82 |
+| Transient AUC | 0.496 | 1.235 | <1e-4/<1e-4 | Mann-Whitney U | 1.66e-100 | 0.56 |
+| Pairwise correlation r | 0.221 | 0.486 | <1e-4/<1e-4 | Mann-Whitney U | <1e-300 | 0.36 |
 
 ## 3. Manuscript claims vs reproduced result
 
 | Manuscript claim | Reproduced? | Evidence |
 |---|---|---|
-| Increased spatial heterogeneity | ✅ | CV 0.72 → 1.13 (both trials) |
-| Altered temporal synchronization | ✅ | mean pairwise r 0.25 → 0.45; p < 1e-300 |
-| Increased amplitude / duration variability | ✅ | peak amp & AUC up, p = 1.7e-27 / p = 6.6e-75 |
-| Distinct Ca²⁺ propagation/coordination | ✅ | correlation-vs-distance elevated at all ranges (Fig 4) |
+| Increased spatial heterogeneity | ✅ | CV 0.65 → 1.04 (both trials) |
+| Altered temporal synchronization | ✅ | mean pairwise r 0.23 → 0.44 across two trial pairs; pooled cell-pair p-values are descriptive |
+| Increased peak amplitude | Mixed | Trial 1 median 3.40 → 7.63; trial 2 3.04 → 2.45 |
+| Distinct Ca²⁺ propagation/coordination | Partial | Correlation-versus-distance supports a coordination difference; propagation was not directly measured |
 
 ## 4. Figures (numbered as in the paper)
 
@@ -64,34 +68,46 @@ Normality via Shapiro–Wilk; Welch t-test if both groups normal, else Mann–Wh
 
 ![Figure 7 — ROI selection (cells intersecting the ROI)](results/figures/figP9_roi.png)
 
-**Figure 8 — Single-cell ΔF/F₀ traces**
+**Figure 8 — Single-cell ΔF/F₀ᵢ traces**
 
-![Figure 8 — Single-cell ΔF/F₀ traces](results/figures/fig1_traces.png)
+![Figure 8 — Single-cell ΔF/F₀ᵢ traces](results/figures/fig1_traces.png)
 
-**Figure 9 — Single-cell metric comparison + p-values**
+**Figure 9 — Active-cell fraction per frame**
 
-![Figure 9 — Single-cell metric comparison + p-values](results/figures/fig3_metrics.png)
+![Figure 9 — Active-cell fraction per frame](results/figures/figR4_active_cell_fraction.png)
 
-**Figure 10 — Regional ΔF/F₀ (R1–R4) with significance**
+**Figure 10 — Single-cell metric comparison + p-values**
 
-![Figure 10 — Regional ΔF/F₀ (R1–R4) with significance](results/figures/figP7_region_bars.png)
+![Figure 10 — Single-cell metric comparison + p-values](results/figures/fig3_metrics.png)
 
-**Figure 11 — Ca²⁺ transient event raster**
+**Figure 11 — Regional ΔF/F₀ᵢ (R1–R4)**
 
-![Figure 11 — Ca²⁺ transient event raster](results/figures/figP6_raster.png)
+![Figure 11 — Regional ΔF/F₀ᵢ (R1–R4)](results/figures/figP7_region_bars.png)
 
-**Figure 12 — Tissue activity heatmaps**
+**Figure 12 — Ca²⁺ transient event raster**
 
-![Figure 12 — Tissue activity heatmaps](results/figures/fig2_heatmaps.png)
+![Figure 12 — Ca²⁺ transient event raster](results/figures/figP6_raster.png)
 
-**Figure 13 — Tissue pattern metrics**
+**Figure 13 — Tissue activity heatmaps**
 
-![Figure 13 — Tissue pattern metrics](results/figures/fig5_pattern_metrics.png)
+![Figure 13 — Tissue activity heatmaps](results/figures/fig2_heatmaps.png)
 
-**Figure 14 — Spatial coordination vs distance**
+**Figure 14 — Per-cell peak activity map**
 
-![Figure 14 — Spatial coordination vs distance](results/figures/fig4_spatial.png)
+![Figure 14 — Per-cell peak activity map](results/figures/figR5_peak_activity_static_masks.png)
 
-**Figure 15 — Time-dependence**
+**Figure 15 — Activity maps at three timepoints**
 
-![Figure 15 — Time-dependence](results/figures/fig6_time.png)
+![Figure 15 — Activity maps at three timepoints](results/figures/figR6_timepoint_activity_static_masks.png)
+
+**Figure 16 — Tissue pattern metrics**
+
+![Figure 16 — Tissue pattern metrics](results/figures/fig5_pattern_metrics.png)
+
+**Figure 17 — Spatial coordination vs distance**
+
+![Figure 17 — Spatial coordination vs distance](results/figures/fig4_spatial.png)
+
+**Figure 18 — Time-dependence**
+
+![Figure 18 — Time-dependence](results/figures/fig6_time.png)

@@ -37,6 +37,9 @@ FIGS = os.path.join(HERE, "results", "figures")
 REGEN = os.path.join(HERE, "regenerated", "LATA1TRAIL")   # end-to-end recomputed masks/CSVs
 os.makedirs(FIGS, exist_ok=True)
 TRIAL = "LATA1TRAIL"
+RAW_DATA_ROOT = os.environ.get("CAFIN_RAW_DATA_ROOT")
+MASK_ROOT = os.environ.get("CAFIN_MASK_ROOT")
+NORMALIZED = os.path.join(HERE, "normalized_per_cell", TRIAL)
 THRESH = 0.5
 # ROI rectangles reconstructed from the group's original roi_cells selection
 ROI_BOX = {"BEFOREDRUG": (146, 205, 355, 325), "AFTERDRUG": (144, 195, 372, 310)}
@@ -49,24 +52,39 @@ def base_of(folder):
     return os.path.basename(f)[:-8]                    # strip NNNN.tif
 
 
+def raw_folder(cond, kind):
+    if RAW_DATA_ROOT:
+        original = os.path.join(RAW_DATA_ROOT, TRIAL, cond, kind)
+        if glob.glob(os.path.join(original, "*.tif")):
+            return original
+        recording = "lat_trial1_beforedrug" if cond == "BEFOREDRUG" else "lat_trial1_afterdrug"
+        return os.path.join(RAW_DATA_ROOT, recording, kind)
+    return os.path.join(ROOT, TRIAL, cond, kind)
+
+
 def load_mask(cond):
     """Prefer the end-to-end recomputed mask, else the existing one."""
+    if MASK_ROOT:
+        return tifffile.imread(os.path.join(MASK_ROOT, cond, "mask_0.tiff"))
     rg = os.path.join(REGEN, cond, "mask_0.tiff")
     p = rg if os.path.exists(rg) else os.path.join(ROOT, TRIAL, cond, "mask_0.tiff")
     return tifffile.imread(p)
 
 
 def load_dff_cen(cond):
-    """Return (dff DataFrame, centroids DataFrame), preferring recomputed CSVs."""
+    """Return corrected per-cell dF/F0 and matching centroid data when available."""
     rg = os.path.join(REGEN, cond)
-    base = rg if os.path.exists(os.path.join(rg, "all_cells_normalized.csv")) \
-        else os.path.join(ROOT, TRIAL, cond)
-    return (pd.read_csv(os.path.join(base, "all_cells_normalized.csv")),
-            pd.read_csv(os.path.join(base, "centroids_0.csv")))
+    corrected = os.path.join(NORMALIZED, cond)
+    original = os.path.join(ROOT, TRIAL, cond)
+    def preferred(name):
+        return next(os.path.join(folder, name) for folder in (corrected, rg, original)
+                    if os.path.exists(os.path.join(folder, name)))
+    return (pd.read_csv(preferred("all_cells_normalized.csv")),
+            pd.read_csv(preferred("centroids_0.csv")))
 
 
 def load(cond, kind, i):
-    folder = os.path.join(ROOT, TRIAL, cond, kind)
+    folder = raw_folder(cond, kind)
     b = base_of(folder)
     return skio.imread(os.path.join(folder, f"{b}{i:04d}.tif"))
 
@@ -85,7 +103,7 @@ def red_mask_overlay(gray, mask, color=(230, 30, 30), alpha_fill=0.35):
 def moving_frame(cond):
     """Pick the frame with the LARGEST estimated motion vs frame 0, so the overlay
     actually shows registration doing something (baseline motion is small)."""
-    folder = os.path.join(ROOT, TRIAL, cond, "membrane")
+    folder = raw_folder(cond, "membrane")
     b = base_of(folder)
     n = len(glob.glob(os.path.join(folder, "*.tif")))
     f0 = skio.imread(os.path.join(folder, f"{b}0000.tif"))
@@ -159,7 +177,7 @@ def processing_row(cond="BEFOREDRUG"):
     fig, ax = plt.subplots(1, 4, figsize=(15, 4))
     for a, (img, title, cmap) in zip(ax, panels):
         a.imshow(img, cmap=cmap); a.set_title(title, fontsize=10); a.axis("off")
-    fig.suptitle(f"Image processing pipeline — {('Baseline' if cond=='BEFOREDRUG' else 'Latrunculin B')}",
+    fig.suptitle(f"Image processing pipeline — {('Baseline' if cond=='BEFOREDRUG' else 'Latrunculin A')}",
                  fontweight="bold")
     fig.tight_layout()
     out = os.path.join(FIGS, "figP4_processing_row.png"); fig.savefig(out); plt.close(fig)
@@ -192,7 +210,7 @@ def _events(A):
 def raster_figure():
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharey=False)
     for ax, cond, title in [(axes[0], "BEFOREDRUG", "Baseline"),
-                            (axes[1], "AFTERDRUG", "Latrunculin B")]:
+                            (axes[1], "AFTERDRUG", "Latrunculin A")]:
         dff, _ = load_dff_cen(cond)
         cells = [c for c in dff.columns if c.startswith("Cell_")]
         A = np.nan_to_num(dff[cells].to_numpy(float))
@@ -253,7 +271,7 @@ def roi_figure(cond="BEFOREDRUG"):
 def region_bars():
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
     for ax, cond, title in [(axes[0], "BEFOREDRUG", "Baseline"),
-                            (axes[1], "AFTERDRUG", "Latrunculin B")]:
+                            (axes[1], "AFTERDRUG", "Latrunculin A")]:
         dff, cen = load_dff_cen(cond)
         cells = [c for c in dff.columns if c.startswith("Cell_")]
         A = np.nan_to_num(dff[cells].to_numpy(float))
@@ -284,6 +302,84 @@ def region_bars():
     fig.savefig(os.path.join(FIGS, "figP7_region_bars.png")); plt.close(fig)
 
 
+# ============================================================ R4–R6 per-cell activity
+def _activity_data(cond):
+    """Corrected per-cell traces, numeric cell IDs, and the saved frame-0 mask."""
+    dff, _ = load_dff_cen(cond)
+    cells = [column for column in dff if column.startswith("Cell_")]
+    ids = np.array([int(column.split("_", 1)[1]) for column in cells], dtype=int)
+    return dff, ids, dff[cells].to_numpy(dtype=float), load_mask(cond)
+
+
+def _values_on_static_mask(mask, ids, values):
+    """Paint values onto their corresponding labels in a fixed frame-0 mask."""
+    lookup = np.full(int(mask.max()) + 1, np.nan, dtype=float)
+    present = (ids > 0) & (ids < len(lookup))
+    lookup[ids[present]] = values[present]
+    return np.ma.masked_invalid(lookup[mask.astype(int)])
+
+
+def active_cell_fraction():
+    """Fraction of measured cells above ΔF/F₀ᵢ = 0.5 in each source frame."""
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    for cond, label, color in (("BEFOREDRUG", "Baseline", "#2b8cbe"),
+                               ("AFTERDRUG", "After drug", "#d95f0e")):
+        dff, _, values, _ = _activity_data(cond)
+        valid = np.isfinite(values)
+        count = valid.sum(axis=1)
+        active = (valid & (values > THRESH)).sum(axis=1)
+        fraction = np.divide(active, count, out=np.full(len(count), np.nan), where=count > 0)
+        ax.plot(dff["Frame"], fraction * 100, lw=2, label=label, color=color)
+    ax.set(xlabel="Frame", ylabel="Active measured cells (%)", ylim=(0, 100),
+           title="Single-cell calcium activity (ΔF/F₀ᵢ > 0.5)")
+    ax.grid(alpha=0.25); ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIGS, "figR4_active_cell_fraction.png")); plt.close(fig)
+
+
+def peak_activity_maps():
+    """Per-cell peak ΔF/F₀ᵢ on each condition's saved frame-0 label mask."""
+    panels = []
+    for cond in ("BEFOREDRUG", "AFTERDRUG"):
+        _, ids, values, mask = _activity_data(cond)
+        peaks = np.nanmax(values, axis=0)
+        panels.append((cond, _values_on_static_mask(mask, ids, peaks), peaks))
+    finite = np.concatenate([peaks[np.isfinite(peaks)] for _, _, peaks in panels])
+    vmax = max(float(np.percentile(finite, 99)), 0.01)
+    cmap = plt.colormaps["inferno"].copy(); cmap.set_bad("white")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), constrained_layout=True)
+    for ax, (cond, painted, _) in zip(axes, panels):
+        im = ax.imshow(painted, cmap=cmap, vmin=0, vmax=vmax)
+        ax.set_title("Baseline" if cond == "BEFOREDRUG" else "After drug")
+        ax.axis("off")
+    fig.colorbar(im, ax=axes, shrink=0.8, label="Peak ΔF/F₀ᵢ (shared 99th-percentile scale)")
+    fig.suptitle("Peak calcium activity per cell, shown on static frame-0 masks")
+    fig.savefig(os.path.join(FIGS, "figR5_peak_activity_static_masks.png")); plt.close(fig)
+
+
+def timepoint_activity_maps():
+    """Early, middle, and late per-cell values on fixed masks; no motion is depicted."""
+    conditions = []
+    for cond in ("BEFOREDRUG", "AFTERDRUG"):
+        conditions.append((cond, *_activity_data(cond)))
+    finite = np.concatenate([values[np.isfinite(values)] for _, _, _, values, _ in conditions])
+    vmax = max(float(np.percentile(finite, 99)), 0.01)
+    cmap = plt.colormaps["inferno"].copy(); cmap.set_bad("white")
+    fig, axes = plt.subplots(2, 3, figsize=(13, 8.5), constrained_layout=True)
+    for row, (cond, dff, ids, values, mask) in enumerate(conditions):
+        for col, (stage, index) in enumerate((("Early", 0), ("Middle", len(dff) // 2),
+                                               ("Late", len(dff) - 1))):
+            ax = axes[row, col]
+            im = ax.imshow(_values_on_static_mask(mask, ids, values[index]),
+                           cmap=cmap, vmin=0, vmax=vmax)
+            condition = "Baseline" if cond == "BEFOREDRUG" else "After drug"
+            ax.set_title(f"{condition}: {stage.lower()} (frame {int(dff['Frame'].iloc[index])})")
+            ax.axis("off")
+    fig.colorbar(im, ax=axes, shrink=0.8, label="ΔF/F₀ᵢ (shared 99th-percentile scale)")
+    fig.suptitle("Calcium activity at three timepoints — values on static frame-0 masks; cell motion is not shown")
+    fig.savefig(os.path.join(FIGS, "figR6_timepoint_activity_static_masks.png")); plt.close(fig)
+
+
 # ============================================================ P1 pipeline schematic
 def pipeline_schematic(before_ov, after_ov, mask_ov):
     fig = plt.figure(figsize=(15, 7))
@@ -309,7 +405,7 @@ def pipeline_schematic(before_ov, after_ov, mask_ov):
     a.axis("off"); a.set_title("before / after", fontsize=8)
     # 3 traces
     a = fig.add_subplot(gs[1, 2])
-    dff = pd.read_csv(os.path.join(ROOT, TRIAL, "AFTERDRUG", "all_cells_normalized.csv"))
+    dff, _ = load_dff_cen("AFTERDRUG")
     cells = [c for c in dff.columns if c.startswith("Cell_")][:40]
     for c in cells:
         a.plot(dff["Frame"], dff[c], lw=0.4, alpha=0.5)
@@ -324,7 +420,7 @@ def pipeline_schematic(before_ov, after_ov, mask_ov):
     a.set_title("ΔF/F₀ [%]", fontsize=8); a.tick_params(labelsize=6)
     # 5 kymograph / heatmap mini
     a = fig.add_subplot(gs[1, 4])
-    order = np.argsort(A.max(1))[::-1]
+    order = np.argsort(A.max(0))[::-1]
     a.imshow(A[:, order].T, aspect="auto", cmap="gray", vmin=0, vmax=np.percentile(A, 99))
     a.set_title("tissue kymograph", fontsize=8); a.axis("off")
     fig.suptitle("Figure 1. Image and data processing pipeline", fontweight="bold", fontsize=13)
@@ -339,6 +435,9 @@ def main():
     print("P5 numbered mask…"); mask_ov = numbered_mask("BEFOREDRUG")
     print("P6 event raster…"); raster_figure()
     print("P7 regional bars…"); region_bars()
+    print("R4 active-cell fraction…"); active_cell_fraction()
+    print("R5 peak activity maps…"); peak_activity_maps()
+    print("R6 timepoint activity maps…"); timepoint_activity_maps()
     print("P8 background regions…"); background_figure("BEFOREDRUG")
     print("P9 ROI selection…"); roi_figure("BEFOREDRUG")
     print("P1 pipeline schematic…"); pipeline_schematic(b_before, b_after, mask_ov)

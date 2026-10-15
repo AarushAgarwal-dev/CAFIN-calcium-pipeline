@@ -5,13 +5,14 @@ the full documented chain end-to-end (no reliance on the pre-existing CSVs):
   1. rigid ECC registration: membrane -> frame 0, warp applied to calcium
   2. Cellpose cyto3 segmentation (channels=[2,0], diameter 15) on registered frame-0 membrane
   3. background subtraction of the calcium channel (3 auto regions, 1.5xIQR, avg of medians)
-  4. per-cell mean-intensity traces -> ΔF/F₀ = (Ft-F0)/F0  (F0 = lowest-activity frames)
+  4. per-cell mean-intensity traces -> ΔF/F₀ = (Ft-F0i)/F0i
+     (F0i = mean of that cell's own lowest-intensity frames)
   5. ROI export (cells intersecting a rectangular ROI) -> separate CSV
   6. centroids from the mask
 
-Only LATA1 has raw TIFF stacks, so this regenerates LATA1 BEFOREDRUG + AFTERDRUG.
-LATA2 (no raw TIFFs) continues to use its existing pipeline CSVs; reproduce.py
-labels the provenance of each field.
+This regenerates LATA1 BEFOREDRUG + AFTERDRUG. Set CAFIN_RAW_DATA_ROOT to the
+external "Total data" directory to use its lat_trial1_* source recordings without
+copying TIFFs into this repository. Otherwise, use LATA1TRAIL/<COND>/ locally.
 
 Outputs -> REPRODUCE/regenerated/LATA1TRAIL/<COND>/
 Run:  python recompute_from_raw.py
@@ -32,20 +33,50 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "regenerated", "LATA1TRAIL")
 TRIAL = "LATA1TRAIL"
+RAW_DATA_ROOT = os.environ.get("CAFIN_RAW_DATA_ROOT")
+SOURCE_RECORDINGS = {
+    "BEFOREDRUG": "lat_trial1_beforedrug",
+    "AFTERDRUG": "lat_trial1_afterdrug",
+}
 # ROI rectangles (x1,y1,x2,y2) reconstructed from the group's original roi_cells selection
 ROI_BOX = {"BEFOREDRUG": (146, 205, 355, 325), "AFTERDRUG": (144, 195, 372, 310)}
 
 
 def base_of(folder):
-    f = sorted(glob.glob(os.path.join(folder, "*.tif")))[0]
+    files = sorted(glob.glob(os.path.join(folder, "*.tif")))
+    if not files:
+        raise FileNotFoundError(f"No source TIFFs found in {folder}")
+    f = files[0]
     return os.path.basename(f)[:-8]
 
 
+def source_folder(cond, channel):
+    if cond not in SOURCE_RECORDINGS:
+        raise ValueError(f"Unknown condition: {cond}")
+    if RAW_DATA_ROOT:
+        original = os.path.join(RAW_DATA_ROOT, TRIAL, cond, channel)
+        if glob.glob(os.path.join(original, "*.tif")):
+            return original
+        return os.path.join(RAW_DATA_ROOT, SOURCE_RECORDINGS[cond], channel)
+    return os.path.join(ROOT, TRIAL, cond, channel)
+
+
 def recompute(cond):
-    memf = os.path.join(ROOT, TRIAL, cond, "membrane")
-    caf = os.path.join(ROOT, TRIAL, cond, "ca2")
+    from importlib.metadata import version
+    cellpose_version = version("cellpose")
+    if cellpose_version.split(".", 1)[0] != "3":
+        raise RuntimeError(
+            "Paper-method raw segmentation requires Cellpose 3.x cyto3; "
+            f"found Cellpose {cellpose_version}. Use the processed-trace workflow "
+            "or an isolated Cellpose 3 environment."
+        )
+    memf = source_folder(cond, "membrane")
+    caf = source_folder(cond, "ca2")
     mem_base = base_of(memf); ca_base = base_of(caf)
     n = len([f for f in os.listdir(memf) if f.startswith(mem_base) and f.endswith(".tif")])
+    ca_n = len([f for f in os.listdir(caf) if f.startswith(ca_base) and f.endswith(".tif")])
+    if ca_n != n:
+        raise ValueError(f"Mismatched source frame counts for {cond}: {n} membrane, {ca_n} calcium")
     print(f"\n=== {cond}: {n} frames | mem_base={mem_base} ===")
 
     # 1. register (rigid ECC), membrane -> frame0, warp applied to calcium
@@ -63,7 +94,16 @@ def recompute(cond):
     # 3+4. background-subtracted per-cell traces, then ΔF/F₀
     print("  background subtraction + traces + ΔF/F₀...")
     raw_df = cc.extract_traces(reg, mask0, "static", bg=True)      # bg=True: 3 auto regions, 1.5xIQR
-    dff_df, base = cc.compute_dff0(raw_df, method="lowest")
+    dff_df, _, per_cell_f0 = cc.compute_dff0(raw_df, method="percell", return_f0=True)
+    f0_rows = [
+        {
+            "cell": cell,
+            "f0i": float(f0),
+            "baseline_row_indices": json.dumps([int(row) for row in rows]),
+            "baseline_frames": json.dumps([int(raw_df["Frame"].iloc[row]) for row in rows]),
+        }
+        for cell, (f0, rows) in per_cell_f0.items()
+    ]
 
     # 5. ROI export
     box = ROI_BOX[cond]
@@ -80,11 +120,17 @@ def recompute(cond):
     d = os.path.join(OUT, cond); os.makedirs(d, exist_ok=True)
     raw_df.to_csv(os.path.join(d, "all_cells_raw.csv"), index=False)
     dff_df.to_csv(os.path.join(d, "all_cells_normalized.csv"), index=False)
+    pd.DataFrame(f0_rows).to_csv(os.path.join(d, "f0_per_cell.csv"), index=False)
     roi_df.to_csv(os.path.join(d, "roi_cells_normalized.csv"), index=False)
     cen_df.to_csv(os.path.join(d, "centroids_0.csv"), index=False)
     tifffile.imwrite(os.path.join(d, "mask_0.tiff"), mask0.astype(np.uint16))
     meta = {"cond": cond, "n_frames": n, "n_cells": n_cells, "n_roi_cells": len(roi_ids),
-            "roi_box": box, "baseline_frames": base, "segmentation": "cyto3 channels=[2,0] diam=15",
+            "roi_box": box, "source_membrane_folder": memf, "source_calcium_folder": caf,
+            "normalization": "percell", "formula": "dF/F0i = (F_t_i - F0i) / F0i",
+            "baseline_selection": "each cell's own lowest-intensity frames",
+            "n_base_requested": 10, "n_base_effective": int(min(10, max(3, n // 3))),
+            "f0_floor": 1.0, "per_cell_f0_file": "f0_per_cell.csv",
+            "segmentation": f"Cellpose {cellpose_version} cyto3 channels=[2,0] diam=15",
             "registration": "rigid ECC", "background": "3 auto regions, 1.5xIQR, avg-of-medians"}
     json.dump(meta, open(os.path.join(d, "provenance.json"), "w"), indent=2)
     print(f"  wrote regenerated CSVs -> {d}  ({n_cells} cells, {len(roi_ids)} in ROI)")

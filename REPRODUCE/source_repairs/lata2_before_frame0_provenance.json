@@ -1,0 +1,69 @@
+{
+  "trial": "LATA2TRIAL",
+  "condition": "BEFOREDRUG",
+  "recovered_frame": 0,
+  "n_cells": 479,
+  "method": "saved static mask and source calcium frame, with source background subtraction",
+  "source_files": {
+    "frame0_tiff": {
+      "path": "Total data/lat_trial2_beforedrug/ca2/AVG_C1-latA_trial2_beforedrug0000.tif",
+      "sha256": "5314bc6852e752cbd3591997a4e30634690f6416d1c9572df14aaf9bfa4a3028"
+    },
+    "frame1_registered_tiff": {
+      "path": "Total data/lat_trial2_beforedrug_rigid_output/rigid_green_registered/registered_AVG_C1-latA_trial2_beforedrug0001.tif",
+      "sha256": "8d75c446a5a48372262ce1bce366bcd37d941843a6e093bdfe4150ce49659b5e"
+    },
+    "mask_tiff": {
+      "path": "LATA2TRIAL/BEFOREDRUG/mask_0.tiff",
+      "sha256": "0798c6f1d2367b0530c6caa3539319c326957b0a54294b427b12bcb6761aa1bd"
+    },
+    "source_raw_csv": {
+      "path": "LATA2TRIAL/BEFOREDRUG/all_cells_raw.csv",
+      "sha256": "eb9375453554cc0a1685409f961097e88cf643edd46f8696c704c3a56ec0aa30"
+    }
+  },
+  "background_boxes_xyxy": [
+    [
+      0,
+      0,
+      40,
+      40
+    ],
+    [
+      0,
+      40,
+      40,
+      80
+    ],
+    [
+      0,
+      80,
+      40,
+      120
+    ]
+  ],
+  "background_by_frame": {
+    "0": {
+      "mean": 194.0,
+      "box_medians": [
+        194.0,
+        194.0,
+        194.0
+      ]
+    },
+    "1": {
+      "mean": 194.0,
+      "box_medians": [
+        194.0,
+        194.0,
+        194.0
+      ]
+    }
+  },
+  "frame1_validation": {
+    "n_cells_compared": 479,
+    "max_absolute_error": 2.2737367544323206e-13,
+    "tolerance": 1e-06
+  },
+  "repaired_csv_sha256": "b7b93e34fb762f729a90dc805f532ad0e49e85017c60c824411309beb50f9ff2"
+}
